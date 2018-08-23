@@ -16,17 +16,33 @@ clean:
 	rm -rf ./dist
 	rm -rf ./crossbar.egg-info
 	rm -rf ./.crossbar
-	rm -rf ./_trial_temp
+	-find . -type d -name _trial_temp -exec rm -rf {} \;
+	rm -rf ./tests
 	rm -rf ./.tox
 	rm -rf ./vers
+	rm -f .coverage.*
+	rm -f .coverage
+	rm -rf ./htmlcov
+	-rm -rf ./_trial*
 	find . -name "*.db" -exec rm -f {} \;
 	find . -name "*.pyc" -exec rm -f {} \;
 	find . -name "*.log" -exec rm -f {} \;
 	# Learn to love the shell! http://unix.stackexchange.com/a/115869/52500
 	find . \( -name "*__pycache__" -type d \) -prune -exec rm -rf {} +
 
-docs:
-	python docs/test_server.py
+
+# Targets for Sphinx-based documentation
+#
+docs_clean:
+	-rm -rf ./rtd/_build
+
+docs_builds:
+	sphinx-build -b html rtd rtd/_build
+
+# spellcheck the docs
+docs_spelling:
+	sphinx-build -b spelling -d rtd/_build/doctrees rtd rtd/_build/spelling
+
 
 # call this in a fresh virtualenv to update our frozen requirements.txt!
 freeze: clean
@@ -41,18 +57,19 @@ freeze: clean
 wheel:
 	LMDB_FORCE_CFFI=1 SODIUM_INSTALL=bundled pip wheel --require-hashes --wheel-dir ./wheels -r requirements.txt
 
-install: install_dev
+# install for development, using pinned dependencies, and including dev-only dependencies
+install:
+	-pip uninstall -y crossbar
+	pip install --no-cache --upgrade -r requirements-dev.txt
+	pip install -e .
+	@python -c "import crossbar; print('*** crossbar-{} ***'.format(crossbar.__version__))"
 
 # install using pinned/hashed dependencies, as we do for packaging
 install_pinned:
+	-pip uninstall -y crossbar
 	LMDB_FORCE_CFFI=1 SODIUM_INSTALL=bundled pip install --ignore-installed --require-hashes -r requirements.txt
 	pip install .
-
-# install for development, using pinned dependencies, and including dev-only dependencies
-install_dev:
-	pip install -r requirements-dev.txt
-	pip install -e .
-	python -c "import crossbar; print('\ncrossbar-{} installed'.format(crossbar.__version__))"
+	@python -c "import crossbar; print('*** crossbar-{} ***'.format(crossbar.__version__))"
 
 # upload to our internal deployment system
 upload: clean
@@ -64,8 +81,41 @@ publish: clean
 	python setup.py sdist bdist_wheel
 	twine upload dist/*
 
-test: flake8
+test_trial: flake8
 	trial crossbar
+
+test_full:
+	crossbar \
+		--personality=standalone \
+		--debug-lifecycle \
+		--debug-programflow\
+		start \
+		--cbdir=./test/full/.crossbar
+
+test_manhole:
+	ssh -vvv -p 6022 oberstet@localhost
+
+gen_ssh_keys:
+#	ssh-keygen -t ed25519 -f test/full/.crossbar/ssh_host_ed25519_key
+	ssh-keygen -t rsa -b 4096 -f test/full/.crossbar/ssh_host_rsa_key
+
+test_coverage:
+	tox -e coverage .
+
+test:
+	tox -e sphinx,flake8,py36-unpinned-trial,py36-cli,py36-examples,coverage .
+
+test_bandit:
+	tox -e bandit .
+
+test_cli:
+	./test/test_cli.sh
+
+test_cli_tox:
+	tox -e py36-cli .
+
+test_examples:
+	tox -e py36-examples .
 
 test_mqtt:
 #	trial crossbar.adapter.mqtt.test.test_wamp

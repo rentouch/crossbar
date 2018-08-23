@@ -26,6 +26,7 @@ ENV PYTHONUNBUFFERED 1
 # install dependencies and Crossbar.io
 RUN    apk --update upgrade \
     && apk add libffi \
+               libssl1.0 \
     && apk add --virtual .build-deps \
                build-base \
                libffi-dev \
@@ -43,7 +44,7 @@ RUN    addgroup -S -g 242 crossbar \
     && adduser -S -u 242 -D -h /node -G crossbar -g "Crossbar.io Service" crossbar
 
 # initialize a Crossbar.io node
-COPY ./node/ /node/
+COPY ./_node/ /node/
 RUN chown -R crossbar:crossbar /node
 
 # make /node a volume to allow external configuration

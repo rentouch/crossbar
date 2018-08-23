@@ -30,7 +30,6 @@
 
 from __future__ import absolute_import
 
-from functools import partial
 from datetime import datetime
 
 from twisted import internet
@@ -43,22 +42,20 @@ from autobahn.wamp.exception import ApplicationError
 from autobahn.wamp.types import ComponentConfig, PublishOptions
 from autobahn import wamp
 
-from crossbar.common import checkconfig
 from crossbar.worker import _appsession_loader
-from crossbar.worker.worker import NativeWorkerSession
-from crossbar.router.protocol import WampWebSocketClientFactory, \
-    WampRawSocketClientFactory, WampWebSocketClientProtocol, WampRawSocketClientProtocol
+from crossbar.worker.controller import WorkerController
+from crossbar.router.protocol import WampWebSocketClientFactory, WampRawSocketClientFactory
 
-from crossbar.twisted.endpoint import create_connecting_endpoint_from_config
+from crossbar.common.twisted.endpoint import create_connecting_endpoint_from_config
 
-__all__ = ('ContainerWorkerSession',)
+__all__ = ('ContainerController',)
 
 
 class ContainerComponent(object):
     """
     An application component running inside a container.
 
-    This class is for _internal_ use within ContainerWorkerSession.
+    This class is for _internal_ use within ContainerController.
     """
 
     def __init__(self, component_id, config, proto, session):
@@ -97,7 +94,7 @@ class ContainerComponent(object):
         }
 
 
-class ContainerWorkerSession(NativeWorkerSession):
+class ContainerController(WorkerController):
     """
     A container is a native worker process that hosts application components
     written in Python. A container connects to an application router (creating
@@ -109,8 +106,9 @@ class ContainerWorkerSession(NativeWorkerSession):
     SHUTDOWN_MANUAL = u'shutdown-manual'
     SHUTDOWN_ON_LAST_COMPONENT_STOPPED = u'shutdown-on-last-component-stopped'
 
-    def __init__(self, config=None, reactor=None):
-        NativeWorkerSession.__init__(self, config, reactor)
+    def __init__(self, config=None, reactor=None, personality=None):
+        # base ctor
+        WorkerController.__init__(self, config=config, reactor=reactor, personality=personality)
 
         # map: component ID -> ContainerComponent
         self.components = {}
@@ -129,11 +127,11 @@ class ContainerWorkerSession(NativeWorkerSession):
         Called when worker process has joined the node's management realm.
         """
         self.log.info('Container worker "{worker_id}" session {session_id} initializing ..', worker_id=self._worker_id, session_id=details.session)
-        yield NativeWorkerSession.onJoin(self, details, publish_ready=False)
+        yield WorkerController.onJoin(self, details, publish_ready=False)
 
         self.log.info('Container worker "{worker_id}" session ready', worker_id=self._worker_id)
 
-        # NativeWorkerSession.publish_ready()
+        # WorkerController.publish_ready()
         yield self.publish_ready()
 
     @wamp.register(None)
@@ -193,7 +191,7 @@ class ContainerWorkerSession(NativeWorkerSession):
         # check component configuration
         #
         try:
-            checkconfig.check_container_component(config)
+            self.personality.check_container_component(self.personality, config)
         except Exception as e:
             emsg = u'invalid container component configuration: {}'.format(e)
             self.log.debug(emsg)
@@ -228,6 +226,64 @@ class ContainerWorkerSession(NativeWorkerSession):
         if reload_modules:
             self._module_tracker.reload()
 
+        # prepare some cleanup code this connection goes away
+        def _closed(session, was_clean):
+            """
+            This is moderate hack around the fact that we don't have any way
+            to "listen" for a close event on websocket or rawsocket
+            objects. Also, the rawsocket implementation doesn't have
+            "a" function we can wrap anyway (they are asyncio vs
+            Twisted specific), so for both WebSocket and rawsocket
+            cases, we actually listen on the WAMP session for
+            transport close notifications.
+
+            Ideally we'd listen for "close" on the transport but this
+            works fine for cleaning up the components.
+            """
+            if component_id not in self.components:
+                self.log.warn(
+                    "Component '{id}' closed, but not in set.",
+                    id=component_id,
+                )
+                return
+
+            if was_clean:
+                self.log.info(
+                    "Closed connection to '{id}'",
+                    id=component_id,
+                )
+            else:
+                self.log.error(
+                    "Lost connection to component '{id}' uncleanly",
+                    id=component_id,
+                )
+
+            component = self.components[component_id]
+            del self.components[component_id]
+            self._publish_component_stop(component)
+            component._stopped.callback(component.marshal())
+            del component
+
+            # figure out if we need to shut down the container itself or not
+            if not self.components:
+                if self._exit_mode == self.SHUTDOWN_ON_LAST_COMPONENT_STOPPED:
+                    self.log.info(
+                        "Container is hosting no more components: stopping container in exit mode <{exit_mode}> ...",
+                        exit_mode=self._exit_mode,
+                    )
+                    self.shutdown()
+                else:
+                    self.log.info(
+                        "Container is hosting no more components: continue running in exit mode <{exit_mode}>",
+                        exit_mode=self._exit_mode,
+                    )
+            else:
+                self.log.info(
+                    "Container is still hosting {component_count} components: continue running in exit mode <{exit_mode}>",
+                    exit_mode=self._exit_mode,
+                    component_count=len(self.components),
+                )
+
         # WAMP application session factory
         #
         def create_session():
@@ -242,6 +298,13 @@ class ContainerWorkerSession(NativeWorkerSession):
                     )
                     session.disconnect()
                 session._swallow_error = panic
+
+                # see note above, for _closed -- we should be
+                # listening for "the transport was closed", but
+                # "session disconnect" is close enough (since there
+                # are no "proper events" from websocket/rawsocket
+                # implementations).
+                session.on('disconnect', _closed)
 
                 return session
 
@@ -283,60 +346,6 @@ class ContainerWorkerSession(NativeWorkerSession):
         def on_connect_success(proto):
             component = ContainerComponent(component_id, config, proto, None)
             self.components[component_id] = component
-
-            # FIXME: this is a total hack.
-            #
-            def close_wrapper(orig, was_clean, code, reason):
-                """
-                Wrap our protocol's onClose so we can tell when the component
-                exits.
-                """
-                r = orig(was_clean, code, reason)
-                if component.id not in self.components:
-                    self.log.warn("Component '{id}' closed, but not in set.",
-                                  id=component.id)
-                    return r
-
-                if was_clean:
-                    self.log.info("Closed connection to '{id}' with code '{code}'",
-                                  id=component.id, code=code)
-                else:
-                    self.log.error("Lost connection to component '{id}' with code '{code}'.",
-                                   id=component.id, code=code)
-
-                if reason:
-                    self.log.warn(str(reason))
-
-                del self.components[component.id]
-                self._publish_component_stop(component)
-                component._stopped.callback(component.marshal())
-
-                if not self.components:
-                    if self._exit_mode == self.SHUTDOWN_ON_LAST_COMPONENT_STOPPED:
-                        self.log.info("Container is hosting no more components: stopping container in exit mode <{exit_mode}> ...", exit_mode=self._exit_mode)
-                        self.shutdown()
-                    else:
-                        self.log.info("Container is hosting no more components: continue running in exit mode <{exit_mode}>", exit_mode=self._exit_mode)
-                else:
-                    self.log.info("Container is still hosting {component_count} components: continue running in exit mode <{exit_mode}>", exit_mode=self._exit_mode, component_count=len(self.components))
-
-                return r
-
-            # FIXME: due to history, the following is currently the case:
-            # ITransportHandler.onClose is implemented directly on WampWebSocketClientProtocol,
-            # while with WampRawSocketClientProtocol, the ITransportHandler is implemented
-            # by the object living on proto._session
-            #
-            if isinstance(proto, WampWebSocketClientProtocol):
-                proto.onClose = partial(close_wrapper, proto.onClose)
-
-            elif isinstance(proto, WampRawSocketClientProtocol):
-                # FIXME: doesn't work without guard, since proto_.session is not yet there when
-                # proto comes into existance ..
-                if proto._session:
-                    proto._session.onClose = partial(close_wrapper, proto._session.onClose)
-            else:
-                raise Exception(u'logic error')
 
             # publish event "on_component_start" to all but the caller
             #

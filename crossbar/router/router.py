@@ -40,7 +40,6 @@ from autobahn.wamp import message
 from autobahn.wamp.exception import ProtocolError
 
 from crossbar.router import RouterOptions
-from crossbar.router.realmstore import HAS_LMDB, LmdbRealmStore, MemoryRealmStore
 from crossbar.router.broker import Broker
 from crossbar.router.dealer import Dealer
 from crossbar.router.role import RouterRole, \
@@ -161,12 +160,12 @@ class Router(object):
 
         # log session details, but skip Crossbar.io internal sessions
         if self.realm != u'crossbar':
-            self.log.info(
+            self.log.debug(
                 'session "{session_id}" joined realm "{realm}"',
                 session_id=details[u'session'],
                 realm=self.realm,
             )
-            self.log.debug('{details}', details=details)
+            self.log.trace('{details}', details=details)
 
     def _session_left(self, session, details):
         """
@@ -179,12 +178,12 @@ class Router(object):
 
         # log session details, but skip Crossbar.io internal sessions
         if self.realm != u'crossbar':
-            self.log.info(
+            self.log.debug(
                 'session "{session_id}" left realm "{realm}"',
                 session_id=details[u'session'],
                 realm=self.realm,
             )
-            self.log.debug('{details}', details=details)
+            self.log.trace('{details}', details=details)
 
     def detach(self, session=None):
         detached_session_ids = []
@@ -466,19 +465,8 @@ class RouterFactory(object):
         # realm store as appropriate ..
         store = None
         if 'store' in realm.config:
-            store_config = realm.config['store']
-
-            if store_config['type'] == 'lmdb':
-                # if LMDB is available, and a realm store / database is configured,
-                # create an LMDB environment
-                if not HAS_LMDB:
-                    raise Exception("LDMB not available")
-                store = LmdbRealmStore(store_config)
-
-            elif store_config['type'] == 'memory':
-                store = MemoryRealmStore(store_config)
-            else:
-                raise Exception('logic error')
+            psn = self._worker.personality
+            store = psn.create_realm_store(psn, realm.config['store'])
 
         # now create a router for the realm
         #
@@ -507,6 +495,7 @@ class RouterFactory(object):
             raise Exception('no router started for realm "{}"'.format(realm))
 
         router = self._routers[realm]
+        del self._routers[realm]
         detached_sessions = router.detach()
 
         return detached_sessions
