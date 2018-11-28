@@ -78,23 +78,25 @@ class RouterRealm(object):
     A realm running in a router worker.
     """
 
-    def __init__(self, id, config, session=None):
+    def __init__(self, controller, id, config, session=None):
         """
         Ctor.
 
         :param id: The realm ID within the router.
         :type id: str
+
         :param config: The realm configuration.
         :type config: dict
+
         :param session: The realm service session.
-        :type session: instance of CrossbarRouterServiceSession
+        :type session: :class:`crossbar.router.service.RouterServiceAgent`
         """
+        self.controller = controller
         self.id = id
         self.config = config
         self.session = session
         self.created = datetime.utcnow()
         self.roles = {}
-        self.uplinks = {}
 
     def marshal(self):
         return {
@@ -122,23 +124,3 @@ class RouterRealmRole(object):
         """
         self.id = id
         self.config = config
-
-
-class RouterRealmUplink(object):
-
-    """
-    An uplink in a realm running in a router worker.
-    """
-
-    def __init__(self, id, config):
-        """
-        Ctor.
-
-        :param id: The uplink ID within the realm.
-        :type id: str
-        :param config: The uplink configuration.
-        :type config: dict
-        """
-        self.id = id
-        self.config = config
-        self.session = None

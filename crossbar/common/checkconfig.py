@@ -36,27 +36,26 @@ import re
 import six
 import yaml
 
-from collections import OrderedDict, Hashable
-
 from pprint import pformat
 
 from pygments import highlight, lexers, formatters
 
-from autobahn.websocket.util import parse_url
+import txaio
+txaio.use_twisted()
 
+from autobahn.websocket.util import parse_url
 from autobahn.wamp.message import _URI_PAT_STRICT_NON_EMPTY
 from autobahn.wamp.message import _URI_PAT_STRICT_LAST_EMPTY
 from autobahn.wamp.uri import convert_starred_uri
-
-from txaio import make_logger
 
 from yaml import Loader, SafeLoader, Dumper, SafeDumper
 from yaml.constructor import ConstructorError
 
 if six.PY3:
-    from collections.abc import Mapping, Sequence
+    from collections import OrderedDict
+    from collections.abc import Mapping, Sequence, Hashable
 else:
-    from collections import Mapping, Sequence
+    from collections import Mapping, Sequence, OrderedDict, Hashable
 
 __all__ = ('check_config',
            'check_config_file',
@@ -68,27 +67,6 @@ LATEST_CONFIG_VERSION = 2
 """
 The current configuration file version.
 """
-
-NODE_RUN_STANDALONE = u'runmode_standalone'
-"""
-The Crossbar.io node runs in "standalone mode", thus started and configured
-from a local node configuration.
-"""
-
-NODE_RUN_MANAGED = u'runmode_managed'
-"""
-The Crossbar.io node runs in "managed mode", thus connecting to an uplink
-management application.
-"""
-
-NODE_RUN_MODES = (
-    NODE_RUN_STANDALONE,
-    NODE_RUN_MANAGED
-)
-"""
-Permissible node run modes.
-"""
-
 
 NODE_SHUTDOWN_ON_SHUTDOWN_REQUESTED = u'shutdown_on_shutdown_requested'
 """
@@ -124,20 +102,26 @@ Permissible node shutdown modes.
 """
 
 
-_WEB_PATH_PAT_STR = "^([a-z0-9A-Z_\-]+|/)$"
+_WEB_PATH_PAT_STR = r'^([a-z0-9A-Z_\-]+|/)$'
 _WEB_PATH_PATH = re.compile(_WEB_PATH_PAT_STR)
-_COOKIE_NAME_PAT_STR = "^[a-z][a-z0-9_]+$"
+
+_COOKIE_NAME_PAT_STR = r'^[a-z][a-z0-9_]+$'
 _COOKIE_NAME_PAT = re.compile(_COOKIE_NAME_PAT_STR)
-_ENV_VAR_PAT_STR = "^\$([a-zA-Z_][a-zA-Z0-9_]*)$"
+
+_ENV_VAR_PAT_STR = r'^\$([a-zA-Z_][a-zA-Z0-9_]*)$'
 _ENV_VAR_PAT = re.compile(_ENV_VAR_PAT_STR)
-_ENVPAT = re.compile(u"^\$\{(.+)\}$")
-_CONFIG_ITEM_ID_PAT_STR = "^[a-z][a-z0-9_]{2,11}$"
+
+_ENVPAT_STR = r'^\$\{(.+)\}$'
+_ENVPAT = re.compile(_ENVPAT_STR)
+
+_CONFIG_ITEM_ID_PAT_STR = r'^[a-z][a-z0-9_]{2,11}$'
 _CONFIG_ITEM_ID_PAT = re.compile(_CONFIG_ITEM_ID_PAT_STR)
-_REALM_NAME_PAT_STR = r"^[A-Za-z][A-Za-z0-9_\-@\.]{2,254}$"
+
+_REALM_NAME_PAT_STR = r'^[A-Za-z][A-Za-z0-9_\-@\.]{2,254}$'
 _REALM_NAME_PAT = re.compile(_REALM_NAME_PAT_STR)
 
 
-log = make_logger()
+log = txaio.make_logger()
 
 
 class InvalidConfigException(Exception):
@@ -1204,6 +1188,7 @@ def check_websocket_compression(options):
 
 def check_web_path_service_websocket_reverseproxy(personality, config):
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'url': (False, [six.text_type]),
         'options': (False, [Mapping]),
@@ -1236,6 +1221,7 @@ def check_web_path_service_websocket(personality, config):
     :type config: dict
     """
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'url': (False, [six.text_type]),
         'serializers': (False, [Sequence]),
@@ -1280,6 +1266,7 @@ def check_web_path_service_static(personality, config):
     :type config: dict
     """
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'directory': (False, [six.text_type]),
         'package': (False, [six.text_type]),
@@ -1298,7 +1285,8 @@ def check_web_path_service_static(personality, config):
         check_dict_args({
             'enable_directory_listing': (False, [bool]),
             'mime_types': (False, [Mapping]),
-            'cache_timeout': (False, list(six.integer_types) + [type(None)])
+            'cache_timeout': (False, list(six.integer_types) + [type(None)]),
+            'default_file': (False, [str]),
         }, config['options'], "'options' in Web transport 'static' path service")
 
 
@@ -1313,6 +1301,7 @@ def check_web_path_service_wsgi(personality, config):
     :type config: dict
     """
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'module': (True, [six.text_type]),
         'object': (True, [six.text_type]),
@@ -1332,6 +1321,7 @@ def check_web_path_service_resource(personality, config):
     :type config: dict
     """
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'classname': (True, [six.text_type]),
         'extra': (False, None)
@@ -1349,6 +1339,7 @@ def check_web_path_service_redirect(personality, config):
     :type config: dict
     """
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'url': (True, [six.text_type])
     }, config, "Web transport 'redirect' path service")
@@ -1362,6 +1353,7 @@ def check_web_path_service_nodeinfo(personality, config):
     :type config: dict
     """
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
     }, config, "Web transport 'nodeinfo' path service")
 
@@ -1377,6 +1369,7 @@ def check_web_path_service_reverseproxy(personality, config):
     :type config: dict
     """
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'host': (True, [six.text_type]),
         'port': (False, [six.integer_types]),
@@ -1395,6 +1388,7 @@ def check_web_path_service_json(personality, config):
     :type config: dict
     """
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'value': (True, None),
         'options': (False, [Mapping]),
@@ -1419,6 +1413,7 @@ def check_web_path_service_cgi(personality, config):
     :type config: dict
     """
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'directory': (True, [six.text_type]),
         'processor': (True, [six.text_type]),
@@ -1436,6 +1431,7 @@ def check_web_path_service_longpoll(personality, config):
     :type config: dict
     """
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'options': (False, [Mapping]),
     }, config, "Web transport 'longpoll' path service")
@@ -1488,6 +1484,7 @@ def check_web_path_service_publisher(personality, config):
     :type config: dict
     """
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'realm': (True, [six.text_type]),
         'role': (True, [six.text_type]),
@@ -1523,6 +1520,7 @@ def check_web_path_service_webhook(personality, config):
     :type config: dict
     """
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'realm': (True, [six.text_type]),
         'role': (True, [six.text_type]),
@@ -1535,6 +1533,7 @@ def check_web_path_service_webhook(personality, config):
         'topic': (False, [six.text_type]),
         'success_response': (False, [six.text_type]),
         'error_response': (False, [six.text_type]),
+        'github_secret': (False, [six.text_type]),
     }, config['options'], "Web transport 'webhook' path service")
 
     if 'post_body_limit' in config['options']:
@@ -1552,6 +1551,7 @@ def check_web_path_service_caller(personality, config):
     :type config: dict
     """
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'realm': (True, [six.text_type]),
         'role': (False, [six.text_type]),
@@ -1599,6 +1599,7 @@ def check_web_path_service_path(personality, config):
     :type config: dict
     """
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'paths': (True, [Mapping]),
     }, config, "Web transport 'path' path service")
@@ -1633,6 +1634,7 @@ def check_web_path_service_upload(personality, config):
     """
 
     check_dict_args({
+        'id': (False, [six.text_type]),
         'type': (True, [six.text_type]),
         'realm': (True, [six.text_type]),
         'role': (True, [six.text_type]),
@@ -1686,6 +1688,9 @@ def check_web_path_service(personality, path, config, nested, ignore=[]):
     :param nested: Whether this is a nested path.
     :type nested: bool
     """
+    if 'id' in config:
+        check_id(config['id'])
+
     if 'type' not in config:
         raise InvalidConfigException('missing mandatory attribute "type" in Web service configuration item\n\n{}'.format(path, config))
 
@@ -2577,57 +2582,6 @@ def check_router_components(personality, components):
         personality.check_router_component(personality, component)
 
 
-def check_connection(personality, connection, ignore=[]):
-    """
-    Check a connection item (such as a PostgreSQL or Oracle database connection pool).
-    """
-    if 'id' in connection:
-        check_id(connection['id'])
-
-    if 'type' not in connection:
-        raise InvalidConfigException("missing mandatory attribute 'type' in connection configuration")
-
-    valid_types = ['postgres']
-    if connection['type'] not in valid_types:
-        raise InvalidConfigException("invalid type '{}' for connection type - must be one of {}".format(connection['type'], valid_types))
-
-    if connection['type'] == 'postgres':
-        check_dict_args({
-            'id': (False, [six.text_type]),
-            'type': (True, [six.text_type]),
-            'host': (False, [six.text_type]),
-            'port': (False, six.integer_types),
-            'database': (True, [six.text_type]),
-            'user': (True, [six.text_type]),
-            'password': (False, [six.text_type]),
-            'options': (False, [Mapping]),
-        }, connection, "PostgreSQL connection configuration")
-
-        if 'port' in connection:
-            check_endpoint_port(connection['port'])
-
-        if 'options' in connection:
-            check_dict_args({
-                'min_connections': (False, six.integer_types),
-                'max_connections': (False, six.integer_types),
-            }, connection['options'], "PostgreSQL connection options")
-
-    else:
-        raise InvalidConfigException('logic error')
-
-
-def check_connections(personality, connections):
-    """
-    Connections can be present in controller, router and container processes.
-    """
-    if not isinstance(connections, Sequence):
-        raise InvalidConfigException("'connections' items must be lists ({} encountered)".format(type(connections)))
-
-    for i, connection in enumerate(connections):
-        log.debug("Checking connection item {item} ..", item=i)
-        personality.check_connection(personality, connection)
-
-
 def check_transports(personality, transports):
     """
     Transports can only be present in router workers.
@@ -2678,11 +2632,6 @@ def check_router(personality, router, ignore=[]):
     for i, transport in enumerate(transports):
         log.debug("Checking transport item {item} ..", item=i)
         personality.check_router_transport(personality, transport)
-
-    # connections
-    #
-    connections = router.get('connections', [])
-    check_connections(personality, connections)
 
     # components
     #
@@ -2899,11 +2848,6 @@ def check_container(personality, container, ignore=[]):
     if 'options' in container:
         personality.check_container_options(personality, container['options'])
 
-    # connections
-    #
-    connections = container.get('connections', [])
-    check_connections(personality, connections)
-
     # components
     #
     components = container.get('components', [])
@@ -3071,11 +3015,6 @@ def check_controller(personality, controller, ignore=[]):
 
     if 'manhole' in controller:
         personality.check_manhole(personality, controller['manhole'])
-
-    # connections
-    #
-    connections = controller.get('connections', [])
-    check_connections(personality, connections)
 
 
 def check_config(personality, config):

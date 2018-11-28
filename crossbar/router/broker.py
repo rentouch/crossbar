@@ -89,7 +89,7 @@ class Broker(object):
     def __init__(self, router, reactor, options=None):
         """
 
-        :param router: The router this dealer is part of.
+        :param router: The router this broker is part of.
         :type router: Object that implements :class:`crossbar.router.interfaces.IRouter`.
 
         :param options: Router options.
@@ -167,7 +167,7 @@ class Broker(object):
                    self._router._realm.session and \
                    not subscription.uri.startswith(u'wamp.'):
 
-                    def _publish():
+                    def _publish(subscription):
                         service_session = self._router._realm.session
                         options = types.PublishOptions(
                             correlation_id=None,
@@ -190,7 +190,7 @@ class Broker(object):
                                 options=options,
                             )
                     # we postpone actual sending of meta events until we return to this client session
-                    self._reactor.callLater(0, _publish)
+                    self._reactor.callLater(0, _publish, subscription)
 
             del self._session_to_subscriptions[session]
 
@@ -421,8 +421,7 @@ class Broker(object):
                     #
                     if authorization[u'disclose']:
                         disclose = True
-                    elif (publish.topic.startswith(u"wamp.") or
-                          publish.topic.startswith(u"crossbar.")):
+                    elif (publish.topic.startswith(u"wamp.") or publish.topic.startswith(u"crossbar.")):
                         disclose = True
                     else:
                         disclose = False
@@ -447,7 +446,7 @@ class Broker(object):
                     # the event matches on)
                     #
                     if store_event:
-                        self._event_store.store_event(session._session_id, publication, publish.topic, publish.args, publish.kwargs)
+                        self._event_store.store_event(session, publication, publish)
 
                     # retain event on the topic
                     #
@@ -487,11 +486,6 @@ class Broker(object):
                     # there is any actual receiver right now on the subscription)
                     #
                     for subscription in subscriptions:
-
-                        # persist event history, but check if it is persisted on the individual subscription!
-                        #
-                        if store_event and self._event_store in subscription.observers:
-                            self._event_store.store_event_history(publication, subscription.id)
 
                         # initial list of receivers are all subscribers on a subscription ..
                         #
@@ -540,7 +534,10 @@ class Broker(object):
 
                         for subscription, receivers in subscription_to_receivers.items():
 
-                            self.log.debug('dispatching for subscription={subscription}', subscription=subscription)
+                            storing_event = store_event and self._event_store in subscription.observers
+
+                            self.log.debug('dispatching for subscription={subscription}, storing_event={storing_event}',
+                                           subscription=subscription, storing_event=storing_event)
 
                             # for pattern-based subscriptions, the EVENT must contain
                             # the actual topic being published to
@@ -560,7 +557,8 @@ class Broker(object):
                                                     topic=topic,
                                                     enc_algo=publish.enc_algo,
                                                     enc_key=publish.enc_key,
-                                                    enc_serializer=publish.enc_serializer)
+                                                    enc_serializer=publish.enc_serializer,
+                                                    forward_for=publish.forward_for)
                             else:
                                 msg = message.Event(subscription.id,
                                                     publication,
@@ -569,7 +567,8 @@ class Broker(object):
                                                     publisher=publisher,
                                                     publisher_authid=publisher_authid,
                                                     publisher_authrole=publisher_authrole,
-                                                    topic=topic)
+                                                    topic=topic,
+                                                    forward_for=publish.forward_for)
 
                             # if the publish message had a correlation ID, this will also be the
                             # correlation ID of the event message sent out
@@ -628,16 +627,28 @@ class Broker(object):
                                 # we now actually do the deliveries, but now we know which
                                 # receiver is the last one
                                 if receivers or not self._router.is_traced:
+
                                     # NOT the last chunk (or we're not traced so don't care)
                                     for receiver in receivers_this_chunk:
+
+                                        # send out WAMP msg to peer
                                         self._router.send(receiver, msg)
+                                        if self._event_store or storing_event:
+                                            self._event_store.store_event_history(publication, subscription.id, receiver)
                                 else:
                                     # last chunk, so last receiver gets the different message
                                     for receiver in receivers_this_chunk[:-1]:
                                         self._router.send(receiver, msg)
+                                        if self._event_store or storing_event:
+                                            self._event_store.store_event_history(publication, subscription.id, receiver)
+
+                                    # FIXME: I don't get the following comment and code path. when, how? and what to
+                                    # do about event store? => storing_event
+                                    #
                                     # we might have zero valid receivers
                                     if receivers_this_chunk:
                                         self._router.send(receivers_this_chunk[-1], last_msg)
+                                        # FIXME: => storing_event
 
                                 if receivers:
                                     # still more to do ..

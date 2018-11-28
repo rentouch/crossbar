@@ -232,7 +232,7 @@ class RouterTransport(object):
         returnValue(self)
 
     def _create_web_factory(self, create_paths=False, ignore=[]):
-        raise NotImplemented()
+        raise NotImplementedError()
 
     @inlineCallbacks
     def _create_factory(self, create_paths=False, ignore=[]):
@@ -384,6 +384,8 @@ class RouterWebTransport(RouterTransport):
         # create root web service
         if '/' in self._config.get('paths', []):
             root_config = self._config['paths']['/']
+        elif '/' in self._config.get('web', {}).get('paths', {}):
+            root_config = self._config['web']['paths']['/']
         else:
             root_config = {'type': 'path', 'paths': {}}
         root_factory = self._worker.personality.WEB_SERVICE_FACTORIES[root_config['type']]
@@ -391,6 +393,8 @@ class RouterWebTransport(RouterTransport):
             raise Exception('internal error: missing web service factory for type "{}"'.format(root_config['type']))
 
         root_webservice = yield maybeDeferred(root_factory.create, self, '/', root_config)
+        self.log.info('Created "{root_type}" Web service on root path "/" of Web transport "{transport_id}"',
+                      root_type=root_config['type'], transport_id=self.id)
 
         # create the actual transport factory
         transport_factory = Site(

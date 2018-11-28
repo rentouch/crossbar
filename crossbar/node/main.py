@@ -335,6 +335,20 @@ def _run_command_version(options, reactor, personality):
     except ImportError:
         txaioetcd_ver = '-'
 
+    # xbr
+    try:
+        import xbr  # noqa
+        xbr_ver = _get_version(xbr)
+    except ImportError:
+        xbr_ver = '-'
+
+    # zlmdb
+    try:
+        import zlmdb  # noqa
+        zlmdb_ver = _get_version(zlmdb)
+    except ImportError:
+        zlmdb_ver = '-'
+
     # Release Public Key
     from crossbar.common.key import _read_release_key
     release_pubkey = _read_release_key()
@@ -347,9 +361,9 @@ def _run_command_version(options, reactor, personality):
         log.info(hl(line, color='yellow', bold=True))
     log.info("")
     log.info(" Crossbar.io        : {ver}", ver=decorate(crossbar.__version__))
+    log.info("   txaio            : {ver}", ver=decorate(txaio_ver))
     log.info("   Autobahn         : {ver}", ver=decorate(ab_ver))
     log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(ab_loc))
-    log.debug("     txaio          : {ver}", ver=decorate(txaio_ver))
     log.debug("     UTF8 Validator : {ver}", ver=decorate(utf8_ver))
     log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(utf8_loc))
     log.debug("     XOR Masker     : {ver}", ver=decorate(xor_ver))
@@ -365,8 +379,10 @@ def _run_command_version(options, reactor, personality):
     log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(py_ver_string))
     if personality.NAME in (u'edge', u'master'):
         log.info(" Crossbar.io FX     : {ver}", ver=decorate(crossbarfx_ver))
-    if personality.NAME in (u'master'):
-        log.info("   txaioetcd        : {ver}", ver=decorate(txaioetcd_ver))
+        if personality.NAME in (u'master'):
+            log.info("   txaio-etcd       : {ver}", ver=decorate(txaioetcd_ver))
+        log.info("   XBR              : {ver}", ver=decorate(xbr_ver))
+        log.info("   zLMDB            : {ver}", ver=decorate(zlmdb_ver))
     log.info(" Frozen executable  : {py_is_frozen}", py_is_frozen=decorate('yes' if py_is_frozen else 'no'))
     log.info(" Operating system   : {ver}", ver=decorate(platform.platform()))
     log.info(" Host machine       : {ver}", ver=decorate(platform.machine()))
@@ -690,7 +706,7 @@ def _run_command_start(options, reactor, personality):
     # check and load the node configuration
     #
     try:
-        node.load_config(options.config)
+        config_source = node.load_config(options.config)
     except InvalidConfigException as e:
         log.failure()
         log.error("Invalid node configuration")
@@ -698,6 +714,8 @@ def _run_command_start(options, reactor, personality):
         sys.exit(1)
     except:
         raise
+    else:
+        log.info('Configuration source {config_source}', config_source=config_source)
 
     # https://twistedmatrix.com/documents/current/api/twisted.internet.interfaces.IReactorCore.html
     # Each "system event" in Twisted, such as 'startup', 'shutdown', and 'persist', has 3 phases:
@@ -789,7 +807,7 @@ def _run_command_start(options, reactor, personality):
 
     # now enter event loop ..
     #
-    log.info(hl('Entering event reactor ...', color='cyan', bold=True))
+    log.info(hl('Entering event reactor ...', color='green', bold=True))
     term_print('CROSSBAR:REACTOR_ENTERED')
     reactor.run()
 

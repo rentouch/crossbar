@@ -1,4 +1,4 @@
-FROM amd64/pypy:3
+FROM amd64/pypy:3-slim
 
 MAINTAINER The Crossbar.io Project <support@crossbario.com>
 
@@ -31,13 +31,11 @@ RUN    apt-get update \
                expat \
                build-essential \
                libssl-dev \
-
     # install Crossbar.io from PyPI
     && pip install --no-cache-dir -U pip \
     && pip install --no-cache-dir crossbar>=${CROSSBAR_VERSION} \
-
     # minimize image
-    && apt-get remove -y wget expat build-essential \
+    # && apt-get remove -y wget expat build-essential \
     && rm -rf ~/.cache \
     && rm -rf /var/lib/apt/lists/*
 
@@ -48,7 +46,7 @@ RUN crossbar version
 RUN adduser --system --group --uid 242 --home /node crossbar
 
 # initialize a Crossbar.io node
-COPY ./_node/ /node/
+COPY ./.node/ /node/
 RUN chown -R crossbar:crossbar /node
 
 # make /node a volume to allow external configuration

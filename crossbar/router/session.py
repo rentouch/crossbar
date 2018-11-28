@@ -206,9 +206,7 @@ class RouterApplicationSession(object):
                               message.Yield,
                               message.Register,
                               message.Unregister,
-                              message.Cancel)) or \
-            (isinstance(msg, message.Error) and
-             msg.request_type == message.Invocation.MESSAGE_TYPE):
+                              message.Cancel)) or (isinstance(msg, message.Error) and msg.request_type == message.Invocation.MESSAGE_TYPE):
 
             # deliver message to router
             #
@@ -619,8 +617,18 @@ class RouterSession(BaseSession):
 
             # if the client had a reassigned realm during authentication, restore it from the cookie
             if hasattr(self._transport, '_authrealm') and self._transport._authrealm:
-                realm = self._transport._authrealm
-                authextra = self._transport._authextra
+                if u'cookie' in authmethods:
+                    realm = self._transport._authrealm
+                    authextra = self._transport._authextra
+                elif self._transport._authprovider == u'cookie':
+                    # revoke authentication and invalidate cookie (will be revalidated if following auth is successful)
+                    self._transport._authmethod = None
+                    self._transport._authrealm = None
+                    self._transport._authid = None
+                    if hasattr(self._transport, '_cbtid'):
+                        self._transport.factory._cookiestore.setAuth(self._transport._cbtid, None, None, None, None, None)
+                else:
+                    pass  # TLS authentication is not revoked here
 
             # perform authentication
             if self._transport._authid is not None and (self._transport._authmethod == u'trusted' or self._transport._authprovider in authmethods):
@@ -768,21 +776,22 @@ class RouterSession(BaseSession):
         # self._router._realm:           crossbar.worker.router.RouterRealm
         # self._router._realm.session:   crossbar.router.session.CrossbarRouterServiceSession
 
-        self._session_details = {
-            u'session': details.session,
-            u'authid': details.authid,
-            u'authrole': details.authrole,
-            u'authmethod': details.authmethod,
-            u'authextra': details.authextra,
-            u'authprovider': details.authprovider,
-            u'transport': self._transport._transport_info
-        }
-        self._router._session_joined(self, self._session_details)
+        self._session_details = details
+        self._router._session_joined(self, details)
 
         # dispatch session metaevent from WAMP AP
         #
         if self._service_session:
-            self._service_session.publish(u'wamp.session.on_join', self._session_details)
+            evt = {
+                u'session': details.session,
+                u'authid': details.authid,
+                u'authrole': details.authrole,
+                u'authmethod': details.authmethod,
+                u'authextra': details.authextra,
+                u'authprovider': details.authprovider,
+                u'transport': self._transport._transport_info
+            }
+            self._service_session.publish(u'wamp.session.on_join', evt)
 
     def onWelcome(self, msg):
         # this is a hook for authentication methods to deny the
@@ -803,7 +812,7 @@ class RouterSession(BaseSession):
             for msg in self._testaments[u"destroyed"]:
                 self._router.process(self, msg)
 
-            self._router._session_left(self, self._session_details)
+            self._router._session_left(self, self._session_details, details)
 
         # dispatch session metaevent from WAMP AP
         #

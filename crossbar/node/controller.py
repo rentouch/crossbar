@@ -43,8 +43,6 @@ from twisted.internet.defer import Deferred, inlineCallbacks, returnValue
 from twisted.internet.error import ProcessExitedAlready
 from twisted.python.runtime import platform
 
-from txaio import make_logger, get_global_log_level
-
 from autobahn.util import utcnow, utcstr
 from autobahn.wamp.exception import ApplicationError
 from autobahn.wamp.types import PublishOptions
@@ -61,6 +59,9 @@ from crossbar.node.worker import GuestWorkerProcess
 from crossbar.common.process import NativeProcess
 from crossbar.common.fswatcher import HAS_FS_WATCHER, FilesystemWatcher
 
+import txaio
+from txaio import make_logger, get_global_log_level
+txaio.use_twisted()
 
 __all__ = ('NodeController', 'create_process_env')
 
@@ -73,20 +74,10 @@ def check_executable(fn):
 
 
 class NodeController(NativeProcess):
-    """
-    Singleton node WAMP session hooked up to the node management router.
-
-    This class exposes the node's management API.
-    """
 
     log = make_logger()
 
     def __init__(self, node):
-        """
-
-        :param node: The node singleton for this node controller session.
-        :type node: obj
-        """
         # base ctor
         NativeProcess.__init__(self, config=None, reactor=node._reactor, personality=node.personality)
 
@@ -215,6 +206,9 @@ class NodeController(NativeProcess):
         term_print('CROSSBAR:NODE_SHUTDOWN_REQUESTED')
 
         try:
+            # shutdown any specific to the node controller
+            yield self._shutdown(restart, mode)
+
             # node shutdown information
             shutdown_info = {
                 u'node_id': self._node._node_id,
@@ -252,13 +246,18 @@ class NodeController(NativeProcess):
         else:
             returnValue(shutdown_info)
 
+    # to be overridden in derived node classes to shutdown any
+    # specifics (eg clients like for etcd or docker)
+    def _shutdown(self, restart=False, mode=None):
+        pass
+
     @wamp.register(None)
     def get_workers(self, details=None):
         """
         Returns the list of workers currently running on this node.
 
         :returns: List of worker processes.
-        :rtype: list of dicts
+        :rtype: list[dict]
         """
         return sorted(self._workers.keys())
 
@@ -325,8 +324,7 @@ class NodeController(NativeProcess):
         :param worker_id: ID of worker to stop.
         :type worker_id: str
 
-        :param kill: If `True`, kill the process. Otherwise, gracefully
-                     shut down the worker.
+        :param kill: If ``True``, kill the process. Otherwise, gracefully shut down the worker.
         :type kill: bool
 
         :returns: Stopping information from the worker.
@@ -521,8 +519,8 @@ class NodeController(NativeProcess):
         # ready handling
         #
         def on_ready_success(worker_id):
-            self.log.info('{worker_type} worker "{worker_id}" process {pid} started',
-                          worker_type=worker_logname, worker_id=worker.id, pid=worker.pid)
+            self.log.debug('{worker_type} worker "{worker_id}" process {pid} started',
+                           worker_type=worker_logname, worker_id=worker.id, pid=worker.pid)
 
             self._node._reactor.addSystemEventTrigger(
                 'before', 'shutdown',
@@ -648,8 +646,6 @@ class NodeController(NativeProcess):
 
         # only the following line will actually exec a new worker process - everything before is just setup
         # for this moment:
-        self.log.info('Starting new managed worker process for {worker_logname} worker "{worker_id}"',
-                      worker_id=worker_id, worker_logname=worker_logname)
         self.log.debug('Starting new managed worker process for {worker_logname} worker "{worker_id}" using {exe} with args {args}',
                        worker_id=worker_id, worker_logname=worker_logname, exe=exe, args=args)
         d = ep.connect(transport_factory)
@@ -673,7 +669,7 @@ class NodeController(NativeProcess):
         def on_connect_error(err):
 
             # not sure when this errback is triggered at all ..
-            self.log.error("Interal error: connection to forked native worker failed ({err})", err=err)
+            self.log.error("Internal error: connection to forked native worker failed ({err})", err=err)
 
             # in any case, forward the error ..
             worker.ready.errback(err)
@@ -772,9 +768,9 @@ class NodeController(NativeProcess):
         Start a new guest process on this node.
 
         :param config: The guest process configuration.
-        :type config: obj
+        :type config: dict
 
-        :returns: int -- The PID of the new process.
+        :returns: The PID of the new process.
         """
         # prohibit starting a worker twice
         #

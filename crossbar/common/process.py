@@ -65,70 +65,12 @@ from txaio import make_logger
 
 from twisted.cred import portal
 
-from crossbar.common.checkconfig import get_config_value
 from crossbar.common.twisted.endpoint import create_listening_port_from_config
 
 from crossbar.common.processinfo import _HAS_PSUTIL
 if _HAS_PSUTIL:
     import psutil
     from crossbar.common.processinfo import ProcessInfo
-    # from crossbar.common.processinfo import SystemInfo
-
-try:
-    from txpostgres import txpostgres
-    _HAS_POSTGRESQL = True
-except ImportError:
-    _HAS_POSTGRESQL = False
-
-__all__ = ('NativeProcess',)
-
-
-if _HAS_POSTGRESQL:
-
-    class PostgreSQLConnection(object):
-        """
-        A PostgreSQL database connection pool.
-        """
-
-        log = make_logger()
-
-        def __init__(self, id, config):
-            """
-
-            :param id: The ID of the connection item.
-            :type id: unicode
-            :param config: The connection item configuration.
-            :type config: dict
-            """
-            self.id = id
-            self.config = config
-            self.started = None
-            self.stopped = None
-
-            params = {
-                'host': config.get('host', 'localhost'),
-                'port': config.get('port', 5432),
-                'database': config['database'],
-                'user': config['user'],
-                'password': get_config_value(config, 'password'),
-            }
-            self.pool = txpostgres.ConnectionPool(None, min=5, **params)
-
-        def start(self):
-            self.started = datetime.utcnow()
-            return self.pool.start()
-
-        def stop(self):
-            self.stopped = datetime.utcnow()
-            return self.pool.close()
-
-        def marshal(self):
-            return {
-                u'id': self.id,
-                u'started': utcstr(self.started),
-                u'stopped': utcstr(self.stopped) if self.stopped else None,
-                u'config': self.config,
-            }
 
 if _HAS_MANHOLE:
     class ManholeService(object):
@@ -195,8 +137,6 @@ class NativeProcess(ApplicationSession):
         super(ApplicationSession, self).__init__(config=config)
 
     def onConnect(self, do_join=True):
-        """
-        """
         if not hasattr(self, 'cbdir'):
             self.cbdir = self.config.extra.cbdir
 
@@ -219,8 +159,6 @@ class NativeProcess(ApplicationSession):
             self._pinfo_monitor = None
             self._pinfo_monitor_seq = None
             self.log.info("Process utilities not available")
-
-        self._connections = {}
 
         if do_join:
             self.join(self.config.realm)
@@ -269,7 +207,7 @@ class NativeProcess(ApplicationSession):
         """
 
         :returns: List of CPU IDs.
-        :rtype: list[Int]
+        :rtype: list[int]
         """
         if not _HAS_PSUTIL:
             emsg = "unable to get CPUs: required package 'psutil' is not installed"
@@ -284,7 +222,7 @@ class NativeProcess(ApplicationSession):
         Get CPU affinity of this process.
 
         :returns: List of CPU IDs the process affinity is set to.
-        :rtype: list of int
+        :rtype: list[int]
         """
         if not _HAS_PSUTIL:
             emsg = "unable to get CPU affinity: required package 'psutil' is not installed"
@@ -309,10 +247,10 @@ class NativeProcess(ApplicationSession):
         :param cpus: List of CPU IDs to set process affinity to. Each CPU ID must be
             from the list `[0 .. N_CPUs]`, where N_CPUs can be retrieved via
             ``crossbar.worker.<worker_id>.get_cpu_count``.
-        :type cpus: list of int
+        :type cpus: list[int]
 
         :returns: List of CPU IDs the process affinity is set to.
-        :rtype: list of int
+        :rtype: list[int]
         """
         if not _HAS_PSUTIL:
             emsg = "Unable to set CPU affinity: required package 'psutil' is not installed"
@@ -352,121 +290,12 @@ class NativeProcess(ApplicationSession):
             #
             return new_affinity
 
-    @inlineCallbacks
-    def start_connection(self, id, config, details=None):
-        """
-        Starts a connection in this process.
-
-        :param id: The ID for the started connection.
-        :type id: unicode
-        :param config: Connection configuration.
-        :type config: dict
-        :param details: Caller details.
-        :type details: instance of :class:`autobahn.wamp.types.CallDetails`
-
-        :returns dict -- The connection.
-        """
-        self.log.debug("start_connection: id={id}, config={config}", id=id, config=config)
-
-        # prohibit starting a component twice
-        #
-        if id in self._connections:
-            emsg = "cannot start connection: a connection with id={} is already started".format(id)
-            self.log.warn(emsg)
-            raise ApplicationError(u"crossbar.error.invalid_configuration", emsg)
-
-        # check configuration
-        #
-        try:
-            self.personality.check_connection(self.personality, config)
-        except Exception as e:
-            emsg = "invalid connection configuration ({})".format(e)
-            self.log.warn(emsg)
-            raise ApplicationError(u"crossbar.error.invalid_configuration", emsg)
-        else:
-            self.log.info("Starting {ptype} in process.", ptype=config['type'])
-
-        if config['type'] == u'postgresql.connection':
-            if _HAS_POSTGRESQL:
-                connection = PostgreSQLConnection(id, config)
-            else:
-                emsg = "unable to start connection - required PostgreSQL driver package not installed"
-                self.log.warn(emsg)
-                raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)
-        else:
-            # should not arrive here
-            raise Exception("logic error")
-
-        self._connections[id] = connection
-
-        try:
-            yield connection.start()
-            self.log.info("Connection {connection_type} started '{connection_id}'", connection_id=id, connection_type=config['type'])
-        except Exception as e:
-            del self._connections[id]
-            raise
-
-        state = connection.marshal()
-
-        self.publish(u'crossbar.node.process.on_connection_start', state)
-
-        returnValue(state)
-
-    @inlineCallbacks
-    def stop_connection(self, id, details=None):
-        """
-        Stop a connection currently running within this process.
-
-        :param id: The ID of the connection to stop.
-        :type id: unicode
-        :param details: Caller details.
-        :type details: instance of :class:`autobahn.wamp.types.CallDetails`
-
-        :returns dict -- A dict with component start information.
-        """
-        self.log.debug("stop_connection: id={id}", id=id)
-
-        if id not in self._connections:
-            raise ApplicationError(u'crossbar.error.no_such_object', 'no connection with ID {} running in this process'.format(id))
-
-        connection = self._connections[id]
-
-        try:
-            yield connection.stop()
-        except Exception as e:
-            self.log.warn('could not stop connection {id}: {error}', error=e)
-            raise
-
-        del self._connections[id]
-
-        state = connection.marshal()
-
-        self.publish(u'crossbar.node.process.on_connection_stop', state)
-
-        returnValue(state)
-
-    def get_connections(self, details=None):
-        """
-        Get connections currently running within this processs.
-
-        :param details: Caller details.
-        :type details: instance of :class:`autobahn.wamp.types.CallDetails`
-
-        :returns list -- List of connections.
-        """
-        self.log.debug("get_connections")
-
-        res = []
-        for c in self._connections.values():
-            res.append(c.marshal())
-        return res
-
     @wamp.register(None)
     def get_process_info(self, details=None):
         """
         Get process information (open files, sockets, ...).
 
-        :returns: dict -- Dictionary with process information.
+        :returns: Dictionary with process information.
         """
         self.log.debug("{cls}.get_process_info",
                        cls=self.__class__.__name__)
@@ -484,7 +313,7 @@ class NativeProcess(ApplicationSession):
         """
         Get process statistics (CPU, memory, I/O).
 
-        :returns: dict -- Dictionary with process statistics.
+        :returns: Dictionary with process statistics.
         """
         self.log.debug("{cls}.get_process_stats", cls=self.__class__.__name__)
 
@@ -821,7 +650,7 @@ class NativeProcess(ApplicationSession):
         """
         Get current manhole service information.
 
-        :returns: dict -- A dict with service information or `None` if the service is not running.
+        :returns: A dict with service information or `None` if the service is not running.
         """
         self.log.debug("{cls}.get_manhole", cls=self.__class__.__name__)
 
@@ -848,7 +677,7 @@ class NativeProcess(ApplicationSession):
         * ``crossbar.node.<node_id>.controller.utcnow`` for node controllers
 
         :returns: Current time (UTC) in UTC ISO 8601 format.
-        :rtype: unicode
+        :rtype: str
         """
         self.log.debug("{cls}.utcnow", cls=self.__class__.__name__)
 
@@ -867,7 +696,7 @@ class NativeProcess(ApplicationSession):
         * ``crossbar.node.<node_id>.controller.started`` for node controllers
 
         :returns: Start time (UTC) in UTC ISO 8601 format.
-        :rtype: unicode
+        :rtype: str
         """
         self.log.debug("{cls}.started", cls=self.__class__.__name__)
 
