@@ -46,6 +46,14 @@ publish:
 	docker push crossbario/crossbar:pypy3
 	docker push crossbario/crossbar:pypy3-${CROSSBAR_VERSION}
 
+	# armhf / community / pypy3
+	# docker push crossbario/crossbar-armhf:pypy3
+	# docker push crossbario/crossbar-armhf:pypy3-${CROSSBAR_VERSION}
+
+	# aarch64 / community / pypy3
+	# docker push crossbario/crossbar-aarch64:pypy3
+	# docker push crossbario/crossbar-aarch64:pypy3-${CROSSBAR_VERSION}
+
 	# trigger updates of metainfo on https://microbadger.com/
 	curl -X POST https://hooks.microbadger.com/images/crossbario/crossbar/jA-pM9fXwd6v4Q7M3PWGG10XPAE=
 	curl -X POST https://hooks.microbadger.com/images/crossbario/crossbar-armhf/3hB5Fn-4Bf2VV9ihB8e7v687Y60=
@@ -66,9 +74,10 @@ qemu_deps:
 # we bake into the images
 #
 autobahn:
-	cp ../../autobahn-js-built/autobahn.* ./node/web/js/
-	cp ../../autobahn-js-built/CHECKSUM.* ./node/web/js/
-	cp ../../autobahn-js-built/LICENSE ./node/web/js/
+	mkdir -p ./.node/web/js/
+	cp ../../autobahn-js-browser/autobahn.* ./.node/web/js/
+	cp ../../autobahn-js-browser/CHECKSUM.* ./.node/web/js/
+	cp ../../autobahn-js-browser/LICENSE ./.node/web/js/
 
 #
 # List all images
@@ -92,7 +101,7 @@ build_cpy3: build_amd64_cpy3 build_armhf_cpy3 build_aarch64_cpy3
 build_amd64_cpy3:
 	# enforce auto-generating a new key when using the images
 	rm -f node/.crossbar/key.*
-	time docker build --no-cache \
+	time docker build \
 		--build-arg BUILD_DATE=${BUILD_DATE} \
 		--build-arg CROSSBAR_VCS_REF=${CROSSBAR_VCS_REF} \
 		--build-arg CROSSBAR_VERSION=${CROSSBAR_VERSION} \
@@ -104,7 +113,7 @@ build_amd64_cpy3:
 build_armhf_cpy3:
 	# enforce auto-generating a new key when using the images
 	rm -f node/.crossbar/key.*
-	time docker build --no-cache \
+	time docker build \
 		--build-arg BUILD_DATE=${BUILD_DATE} \
 		--build-arg CROSSBAR_VCS_REF=${CROSSBAR_VCS_REF} \
 		--build-arg CROSSBAR_VERSION=${CROSSBAR_VERSION} \
@@ -116,7 +125,7 @@ build_armhf_cpy3:
 build_aarch64_cpy3:
 	# enforce auto-generating a new key when using the images
 	rm -f node/.crossbar/key.*
-	time docker build --no-cache \
+	time docker build \
 		--build-arg BUILD_DATE=${BUILD_DATE} \
 		--build-arg CROSSBAR_VCS_REF=${CROSSBAR_VCS_REF} \
 		--build-arg CROSSBAR_VERSION=${CROSSBAR_VERSION} \
@@ -134,7 +143,7 @@ build_pypy3: build_amd64_pypy3 build_armhf_pypy3 build_aarch64_pypy3
 build_amd64_pypy3:
 	# enforce auto-generating a new key when using the images
 	rm -f node/.crossbar/key.*
-	time docker build --no-cache \
+	time docker build \
 		--build-arg BUILD_DATE=${BUILD_DATE} \
 		--build-arg CROSSBAR_VCS_REF=${CROSSBAR_VCS_REF} \
 		--build-arg CROSSBAR_VERSION=${CROSSBAR_VERSION} \

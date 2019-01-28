@@ -194,7 +194,7 @@ class RouterServiceAgent(ApplicationSession):
         :returns: List of WAMP session IDs (order undefined).
         :rtype: list
         """
-        assert(filter_authroles is None or type(filter_authroles) == list)
+        assert(filter_authroles is None or isinstance(filter_authroles, list))
 
         session_ids = []
         for session in self._router._session_id_to_session.values():
@@ -214,7 +214,7 @@ class RouterServiceAgent(ApplicationSession):
         :returns: Count of joined sessions.
         :rtype: int
         """
-        assert(filter_authroles is None or type(filter_authroles) == list)
+        assert(filter_authroles is None or isinstance(filter_authroles, list))
 
         session_count = 0
         for session in self._router._session_id_to_session.values():
@@ -238,7 +238,9 @@ class RouterServiceAgent(ApplicationSession):
         if session_id in self._router._session_id_to_session:
             session = self._router._session_id_to_session[session_id]
             if not is_restricted_session(session):
-                return session._session_details
+                session_info = session._session_details.marshal()
+                session_info[u'transport'] = None if session._transport is None else session._transport._transport_info
+                return session_info
         raise ApplicationError(
             ApplicationError.NO_SUCH_SESSION,
             u'no session with ID {} exists on this router'.format(session_id),
@@ -261,7 +263,7 @@ class RouterServiceAgent(ApplicationSession):
         :param publish_options: The publish options for the publish.
         :type publish_options: None or dict
 
-        :param scope: The scope of the testament, either "detatched" or
+        :param scope: The scope of the testament, either "detached" or
             "destroyed".
         :type scope: str
 
@@ -270,8 +272,8 @@ class RouterServiceAgent(ApplicationSession):
         """
         session = self._router._session_id_to_session[details.caller]
 
-        if scope not in [u"destroyed", u"detatched"]:
-            raise ApplicationError(u"wamp.error.testament_error", u"scope must be destroyed or detatched")
+        if scope not in [u"destroyed", u"detached"]:
+            raise ApplicationError(u"wamp.error.testament_error", u"scope must be destroyed or detached")
 
         pub_id = util.id()
 
@@ -296,7 +298,7 @@ class RouterServiceAgent(ApplicationSession):
         """
         Flush the testaments of a given scope.
 
-        :param scope: The scope to flush, either "detatched" or "destroyed".
+        :param scope: The scope to flush, either "detached" or "destroyed".
         :type scope: str
 
         :returns: Number of flushed testament events.
@@ -304,8 +306,8 @@ class RouterServiceAgent(ApplicationSession):
         """
         session = self._router._session_id_to_session[details.caller]
 
-        if scope not in [u"destroyed", u"detatched"]:
-            raise ApplicationError(u"wamp.error.testament_error", u"scope must be destroyed or detatched")
+        if scope not in [u"destroyed", u"detached"]:
+            raise ApplicationError(u"wamp.error.testament_error", u"scope must be destroyed or detached")
 
         flushed = len(session._testaments[scope])
 

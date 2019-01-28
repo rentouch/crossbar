@@ -252,6 +252,9 @@ class RouterController(WorkerController):
         # create a new router for the realm
         router = self._router_factory.start_realm(rlm)
 
+        if router._store and hasattr(router._store, 'start'):
+            yield router._store.start()
+
         # add a router/realm service session
         extra = {
             # the RouterServiceAgent will fire this when it is ready
@@ -399,6 +402,13 @@ class RouterController(WorkerController):
 
         del self.realms[id].roles[role_id]
 
+        topic = u'{}.on_router_realm_role_stopped'.format(self._uri_prefix)
+        event = {
+            u'id': role_id
+        }
+        caller = details.caller if details else None
+        self.publish(topic, event, options=PublishOptions(exclude=caller))
+
     @wamp.register(None)
     def get_router_components(self, details=None):
         """
@@ -495,18 +505,42 @@ class RouterController(WorkerController):
 
         # create component config
         #
-        realm = config['realm']
-        extra = config.get('extra', None)
+        realm = config.get('realm', None)
+        assert isinstance(realm, str)
+
+        extra = config.get('extra', {})
+        assert isinstance(extra, dict)
+
+        # forward crossbar node base directory
+        extra['cbdir'] = self.config.extra.cbdir
+
+        # allow access to controller session
+        controller = self if self.config.extra.expose_controller else None
+
+        # expose an object shared between components
+        shared = self.components_shared if self.config.extra.expose_shared else None
+
+        # this is the component configuration provided to the components ApplicationSession
         component_config = ComponentConfig(realm=realm,
                                            extra=extra,
                                            keyring=None,
-                                           controller=self if self.config.extra.expose_controller else None,
-                                           shared=self.components_shared if self.config.extra.expose_shared else None)
-        create_component = _appsession_loader(config)
+                                           controller=controller,
+                                           shared=shared)
+
+        # define component ctor function
+        try:
+            create_component = _appsession_loader(config)
+        except ApplicationError as e:
+            # for convenience, also log failed component loading
+            self.log.error(u'component loading failed', log_failure=Failure())
+            if u'No module named' in str(e):
+                self.log.error(u'  Python module search paths:')
+                for path in e.kwargs['pythonpath']:
+                    self.log.error(u'    {path}', path=path)
+            raise
 
         # .. and create and add an WAMP application session to
         # run the component next to the router
-        #
         try:
             session = create_component(component_config)
 
@@ -641,17 +675,30 @@ class RouterController(WorkerController):
         # create a transport and parse the transport configuration
         router_transport = self.personality.create_router_transport(self, transport_id, config)
 
+        caller = details.caller if details else None
+        event = {
+            u'id': transport_id
+        }
+        topic = u'{}.on_router_transport_starting'.format(self._uri_prefix)
+        self.publish(topic, event, options=PublishOptions(exclude=caller))
+
         # start listening ..
         d = router_transport.start(create_paths)
 
         def ok(_):
             self.transports[transport_id] = router_transport
             self.log.debug('Router transport "{transport_id}" started and listening', transport_id=transport_id)
-            return
+
+            topic = u'{}.on_router_transport_started'.format(self._uri_prefix)
+            self.publish(topic, event, options=PublishOptions(exclude=caller))
 
         def fail(err):
             _emsg = "Cannot listen on transport endpoint: {log_failure}"
             self.log.error(_emsg, log_failure=err)
+
+            topic = u'{}.on_router_transport_stopped'.format(self._uri_prefix)
+            self.publish(topic, event, options=PublishOptions(exclude=caller))
+
             raise ApplicationError(u"crossbar.error.cannot_listen", _emsg)
 
         d.addCallbacks(ok, fail)
@@ -670,7 +717,7 @@ class RouterController(WorkerController):
         """
         self.log.debug("{name}.stop_router_transport", name=self.__class__.__name__)
 
-        if transport_id not in self.transports or self.transports[transport_id].state() != self.personality.RouterTransport.STATE_STARTED:
+        if transport_id not in self.transports or self.transports[transport_id].state != self.personality.RouterTransport.STATE_STARTED:
             emsg = "Cannot stop transport: no transport with ID '{}' or transport is already stopping".format(transport_id)
             self.log.error(emsg)
             raise ApplicationError(u'crossbar.error.not_running', emsg)
@@ -679,14 +726,24 @@ class RouterController(WorkerController):
 
         self.log.debug("Stopping transport with ID '{transport_id}'", transport_id=transport_id)
 
+        caller = details.caller if details else None
+        event = {
+            u'id': transport_id
+        }
+        topic = u'{}.on_router_transport_stopping'.format(self._uri_prefix)
+        self.publish(topic, event, options=PublishOptions(exclude=caller))
+
         # stop listening ..
         d = router_transport.stop()
 
         def ok(_):
             del self.transports[transport_id]
 
+            topic = u'{}.on_router_transport_stopped'.format(self._uri_prefix)
+            self.publish(topic, event, options=PublishOptions(exclude=caller))
+
         def fail(err):
-            emsg = "Cannot listen on transport endpoint: {log_failure}"
+            emsg = "Cannot stop listening on transport endpoint: {log_failure}"
             self.log.error(emsg, log_failure=err)
             raise ApplicationError(u"crossbar.error.cannot_stop", emsg)
 
@@ -711,7 +768,7 @@ class RouterController(WorkerController):
         :param details: Call details.
         :type details: :class:`autobahn.wamp.types.CallDetails`
         """
-        if type(config) != dict or 'type' not in config:
+        if not isinstance(config, dict) or 'type' not in config:
             raise ApplicationError(u'crossbar.invalid_argument', 'config parameter must be dict with type attribute')
 
         self.log.info('Starting "{service_type}" Web service on path "{path}" of transport "{transport_id}" {method}',

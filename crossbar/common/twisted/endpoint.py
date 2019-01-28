@@ -30,7 +30,6 @@
 
 from __future__ import absolute_import, division
 
-import six
 import os
 from os import environ
 from os.path import join, abspath, isabs, exists
@@ -94,7 +93,7 @@ def extract_peer_certificate(transport):
         # Extract x509 name components from an OpenSSL X509Name object.
         # pkey = cert.get_pubkey()
         def maybe_bytes(value):
-            if type(value) == six.binary_type:
+            if isinstance(value, bytes):
                 return value.decode('utf8')
             else:
                 return value
@@ -293,7 +292,7 @@ def _create_tls_client_context(config, cbdir, log):
         for cert_fname in [os.path.abspath(os.path.join(cbdir, x)) for x in (config['ca_certificates'])]:
             cert = crypto.load_certificate(
                 crypto.FILETYPE_PEM,
-                six.u(open(cert_fname, 'r').read())
+                open(cert_fname, 'rb').read()
             )
             log.info("TLS client trust root CA certificate loaded from '{fname}'", fname=cert_fname)
             ca_certs.append(cert)
@@ -363,7 +362,7 @@ def create_listening_endpoint_from_config(config, cbdir, reactor, log):
         version = int(config.get('version', 4))
 
         # the listening port
-        if type(config['port']) is six.text_type:
+        if isinstance(config['port'], str):
             # read port from environment variable ..
             try:
                 port = int(environ[config['port'][1:]])
@@ -451,10 +450,15 @@ def create_listening_endpoint_from_config(config, cbdir, reactor, log):
         tor_control_ep = create_connecting_endpoint_from_config(
             config[u'tor_control_endpoint'], cbdir, reactor, log
         )
+        version = config.get('version', 3)  # default to modern version 3
 
         try:
             with open(private_key_fname, 'r') as f:
                 private_key = f.read().strip()
+            log.info(
+                "Onion private key from '{private_key_fname}'",
+                private_key_fname=private_key_fname,
+            )
         except (IOError, OSError):
             private_key = None
 
@@ -472,13 +476,14 @@ def create_listening_endpoint_from_config(config, cbdir, reactor, log):
                     tor_control_ep,
                 )
 
-                # create and add the service
-                hs = txtorcon.EphemeralHiddenService(
-                    ports=["{} 127.0.0.1:{}".format(port, target_port.getHost().port)],
-                    key_blob_or_type=private_key if private_key else "NEW:BEST",
+                log.info("Creating onion service (descriptor upload can take 30s or more)")
+                hs = yield tor.create_onion_service(
+                    ports=[
+                        (port, target_port.getHost().port),
+                    ],
+                    private_key=private_key,
+                    version=version,
                 )
-                log.info("Uploading descriptors can take more than 30s")
-                yield hs.add_to_tor(tor.protocol)
 
                 # if it's new, store our private key
                 # XXX better "if private_key is None"?
@@ -487,14 +492,13 @@ def create_listening_endpoint_from_config(config, cbdir, reactor, log):
                         f.write(hs.private_key)
                     log.info("Wrote private key to '{fname}'", fname=private_key_fname)
 
-                addr = txtorcon.TorOnionAddress(hs, port)
                 log.info(
-                    "Listening on Tor onion service {addr.onion_uri}:{addr.onion_port}"
-                    " with local port {local_port}",
-                    addr=addr,
-                    local_port=target_port.getHost().port,
+                    "Listening on Tor onion service {hs.hostname} "
+                    " with ports: {ports}",
+                    hs=hs,
+                    ports=" ".join(hs.ports),
                 )
-                defer.returnValue(addr)
+                defer.returnValue(target_port)
         endpoint = _EphemeralOnion()
 
     else:
