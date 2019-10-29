@@ -55,13 +55,14 @@ class RouterWebServiceRestPublisher(RouterWebService):
 
         # add the publisher session to the router
         #
+        router = transport._worker._router_session_factory._routerFactory._routers[config['realm']]
         transport._worker._router_session_factory.add(publisher_session,
+                                                      router,
                                                       authrole=config.get('role', 'anonymous'))
 
         # now create the publisher Twisted Web resource
         #
-        resource = PublisherResource(config.get('options', {}), publisher_session,
-                                     auth_config=config.get('auth', {}))
+        resource = PublisherResource(config.get('options', {}), publisher_session)
 
         return RouterWebServiceRestPublisher(transport, path, config, resource)
 
@@ -83,15 +84,16 @@ class RouterWebServiceRestCaller(RouterWebService):
 
         # add the calling session to the router
         #
+        router = transport._worker._router_session_factory._routerFactory._routers[config['realm']]
         transport._worker._router_session_factory.add(caller_session,
+                                                      router,
                                                       authrole=config.get('role', 'anonymous'))
 
         # now create the caller Twisted Web resource
         #
         resource = CallerResource(
             config.get('options', {}),
-            caller_session,
-            auth_config=config.get('auth', {})
+            caller_session
         )
 
         return RouterWebServiceRestCaller(transport, path, config, resource)
@@ -114,7 +116,9 @@ class RouterWebServiceWebhook(RouterWebService):
 
         # add the webhook session to the router
         #
+        router = transport._worker._router_session_factory._routerFactory._routers[config['realm']]
         transport._worker._router_session_factory.add(webhook_session,
+                                                      router,
                                                       authrole=config.get('role', 'anonymous'))
 
         # now create the webhook Twisted Web resource

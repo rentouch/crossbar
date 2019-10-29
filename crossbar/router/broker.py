@@ -37,6 +37,7 @@ import txaio
 from autobahn import util
 from autobahn.wamp import role, message, types
 from autobahn.wamp.exception import ApplicationError
+from autobahn.exception import PayloadExceededError
 
 from autobahn.wamp.message import \
     _URI_PAT_STRICT_NON_EMPTY, _URI_PAT_LOOSE_NON_EMPTY, \
@@ -44,7 +45,7 @@ from autobahn.wamp.message import \
     _URI_PAT_STRICT_LAST_EMPTY, _URI_PAT_LOOSE_LAST_EMPTY
 
 from crossbar.router.observation import UriObservationMap
-from crossbar.router import RouterOptions
+from crossbar.router import RouterOptions, NotAttached
 
 from txaio import make_logger
 
@@ -169,11 +170,14 @@ class Broker(object):
 
                     def _publish(subscription):
                         service_session = self._router._realm.session
+
+                        # FIXME: what about exclude_authid as colleced from forward_for? like we do elsewhere in this file!
                         options = types.PublishOptions(
                             correlation_id=None,
                             correlation_is_anchor=True,
                             correlation_is_last=False
                         )
+
                         if was_subscribed:
                             service_session.publish(
                                 u'wamp.subscription.on_unsubscribe',
@@ -181,6 +185,7 @@ class Broker(object):
                                 subscription.id,
                                 options=options,
                             )
+
                         if was_deleted:
                             options.correlation_is_last = True
                             service_session.publish(
@@ -195,7 +200,7 @@ class Broker(object):
             del self._session_to_subscriptions[session]
 
         else:
-            raise Exception("session with ID {} not attached".format(session._session_id))
+            raise NotAttached("session with ID {} not attached".format(session._session_id))
 
     def _filter_publish_receivers(self, receivers, publish):
         """
@@ -426,10 +431,23 @@ class Broker(object):
                     else:
                         disclose = False
 
+                    forward_for = None
                     if disclose:
-                        publisher = session._session_id
-                        publisher_authid = session._authid
-                        publisher_authrole = session._authrole
+                        if publish.forward_for:
+                            publisher = publish.forward_for[0]['session']
+                            publisher_authid = publish.forward_for[0]['authid']
+                            publisher_authrole = publish.forward_for[0]['authrole']
+                            forward_for = publish.forward_for + [
+                                {
+                                    'session': session._session_id,
+                                    'authid': session._authid,
+                                    'authrole': session._authrole,
+                                }
+                            ]
+                        else:
+                            publisher = session._session_id
+                            publisher_authid = session._authid
+                            publisher_authrole = session._authrole
                     else:
                         publisher = None
                         publisher_authid = None
@@ -558,7 +576,7 @@ class Broker(object):
                                                     enc_algo=publish.enc_algo,
                                                     enc_key=publish.enc_key,
                                                     enc_serializer=publish.enc_serializer,
-                                                    forward_for=publish.forward_for)
+                                                    forward_for=forward_for)
                             else:
                                 msg = message.Event(subscription.id,
                                                     publication,
@@ -568,7 +586,7 @@ class Broker(object):
                                                     publisher_authid=publisher_authid,
                                                     publisher_authrole=publisher_authrole,
                                                     topic=topic,
-                                                    forward_for=publish.forward_for)
+                                                    forward_for=forward_for)
 
                             # if the publish message had a correlation ID, this will also be the
                             # correlation ID of the event message sent out
@@ -632,23 +650,44 @@ class Broker(object):
                                     for receiver in receivers_this_chunk:
 
                                         # send out WAMP msg to peer
-                                        self._router.send(receiver, msg)
+                                        try:
+                                            self._router.send(receiver, msg)
+                                        except PayloadExceededError as e:
+                                            self.log.warn('could not dispatch event to receiver {receiver} (subscription_id={subscription_id}, publication_id={publication_id}): {err}',
+                                                          receiver=receiver._session_id,
+                                                          subscription_id=subscription.id,
+                                                          publication_id=publication,
+                                                          err=str(e))
                                         if self._event_store or storing_event:
                                             self._event_store.store_event_history(publication, subscription.id, receiver)
                                 else:
                                     # last chunk, so last receiver gets the different message
                                     for receiver in receivers_this_chunk[:-1]:
-                                        self._router.send(receiver, msg)
+                                        try:
+                                            self._router.send(receiver, msg)
+                                        except PayloadExceededError as e:
+                                            self.log.warn('could not dispatch event to receiver {receiver} (subscription_id={subscription_id}, publication_id={publication_id}): {err}',
+                                                          receiver=receiver._session_id,
+                                                          subscription_id=subscription.id,
+                                                          publication_id=publication,
+                                                          err=str(e))
                                         if self._event_store or storing_event:
                                             self._event_store.store_event_history(publication, subscription.id, receiver)
 
-                                    # FIXME: I don't get the following comment and code path. when, how? and what to
-                                    # do about event store? => storing_event
-                                    #
-                                    # we might have zero valid receivers
+                                    # send last receiver a different message (and guard: we might have zero valid receivers in the last chunk!)
                                     if receivers_this_chunk:
-                                        self._router.send(receivers_this_chunk[-1], last_msg)
-                                        # FIXME: => storing_event
+                                        receiver = receivers_this_chunk[-1]
+                                        try:
+                                            self._router.send(receiver, last_msg)
+                                        except PayloadExceededError as e:
+                                            self.log.warn('could not dispatch event to receiver {receiver} (subscription_id={subscription_id}, publication_id={publication_id}): {err}',
+                                                          receiver=receiver._session_id,
+                                                          subscription_id=subscription.id,
+                                                          publication_id=publication,
+                                                          err=str(e))
+                                        if self._event_store or storing_event:
+                                            self._event_store.store_event_history(publication, subscription.id,
+                                                                                  receiver)
 
                                 if receivers:
                                     # still more to do ..
@@ -752,6 +791,22 @@ class Broker(object):
                 replies[0].correlation_is_last = True
 
             else:
+                # if the session disconencted while the authorization was
+                # being checked, stop
+                if session not in self._session_to_subscriptions:
+                    # if the session *really* disconnected, it won't have
+                    # a _session_id any longer, so we double-check
+                    if session._session_id is not None:
+                        self.log.error(
+                            "Session '{session_id}' still appears valid, but isn't in subscription map",
+                            session_id=session._session_id,
+                        )
+                    self.log.info(
+                        "Session vanished while subscribing to '{topic}'",
+                        topic=subscribe.topic,
+                    )
+                    return
+
                 # ok, session authorized to subscribe. now get the subscription
                 #
                 subscription, was_already_subscribed, is_first_subscriber = self._subscription_map.add_observer(session, subscribe.topic, subscribe.match, extra=SubscriptionExtra())
@@ -769,13 +824,23 @@ class Broker(object):
 
                     has_follow_up_messages = True
 
+                    exclude_authid = None
+                    if subscribe.forward_for:
+                        exclude_authid = [ff['authid'] for ff in subscribe.forward_for]
+
                     def _publish():
                         service_session = self._router._realm.session
-                        options = types.PublishOptions(
-                            correlation_id=subscribe.correlation_id,
-                            correlation_is_anchor=False,
-                            correlation_is_last=False,
-                        )
+
+                        if exclude_authid or self._router.is_traced:
+                            options = types.PublishOptions(
+                                correlation_id=subscribe.correlation_id,
+                                correlation_is_anchor=False,
+                                correlation_is_last=False,
+                                exclude_authid=exclude_authid,
+                            )
+                        else:
+                            options = None
+
                         if is_first_subscriber:
                             subscription_details = {
                                 u'id': subscription.id,
@@ -789,8 +854,11 @@ class Broker(object):
                                 subscription_details,
                                 options=options,
                             )
+
                         if not was_already_subscribed:
-                            options.correlation_is_last = True
+                            if options:
+                                options.correlation_is_last = True
+
                             service_session.publish(
                                 u'wamp.subscription.on_subscribe',
                                 session._session_id,
@@ -967,14 +1035,19 @@ class Broker(object):
 
             has_follow_up_messages = True
 
+            exclude_authid = None
+            if unsubscribe and unsubscribe.forward_for:
+                exclude_authid = [ff['authid'] for ff in unsubscribe.forward_for]
+
             def _publish():
                 service_session = self._router._realm.session
 
-                if unsubscribe and self._router.is_traced:
+                if unsubscribe and (exclude_authid or self._router.is_traced):
                     options = types.PublishOptions(
                         correlation_id=unsubscribe.correlation_id,
                         correlation_is_anchor=False,
-                        correlation_is_last=False
+                        correlation_is_last=False,
+                        exclude_authid=exclude_authid,
                     )
                 else:
                     options = None

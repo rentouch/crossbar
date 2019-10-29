@@ -36,6 +36,7 @@ import signal
 import threading
 from datetime import datetime
 from shutil import which
+from collections import namedtuple
 
 from twisted.python.reflect import qual
 from twisted.internet.error import ReactorNotRunning
@@ -45,7 +46,7 @@ from twisted.python.runtime import platform
 
 from autobahn.util import utcnow, utcstr
 from autobahn.wamp.exception import ApplicationError
-from autobahn.wamp.types import PublishOptions
+from autobahn.wamp.types import PublishOptions, ComponentConfig
 from autobahn import wamp
 
 import crossbar
@@ -57,7 +58,10 @@ from crossbar.node.guest import create_guest_worker_client_factory
 from crossbar.node.worker import NativeWorkerProcess
 from crossbar.node.worker import GuestWorkerProcess
 from crossbar.common.process import NativeProcess
+from crossbar.common.monitor import SystemMonitor
 from crossbar.common.fswatcher import HAS_FS_WATCHER, FilesystemWatcher
+
+from zlmdb import time_ns
 
 import txaio
 from txaio import make_logger, get_global_log_level
@@ -77,23 +81,31 @@ class NodeController(NativeProcess):
 
     log = make_logger()
 
+    WORKER_TYPE = u'controller'
+
     def __init__(self, node):
-        # base ctor
-        NativeProcess.__init__(self, config=None, reactor=node._reactor, personality=node.personality)
+        # call base ctor
+        extra = namedtuple('Extra', ['node', 'worker'])(node._node_id, 'controller')
+        config = ComponentConfig(realm=node._realm, extra=extra)
+        NativeProcess.__init__(self, config=config, reactor=node._reactor, personality=node.personality)
 
         # associated node
         self._node = node
-        self._realm = node._realm
 
+        # node directory
         self.cbdir = self._node._cbdir
 
+        # overwrite URI prefix for controller (normally: "crossbar.worker.<worker_id>")
         self._uri_prefix = u'crossbar'
 
         self._started = None
         self._pid = os.getpid()
 
         # map of worker processes: worker_id -> NativeWorkerProcess
-        self._workers = {}
+        self._workers = {
+            # add worker tracking instance to the worker map for the controller itself (!) ..
+            # 'controller': self
+        }
 
         # shutdown of node is requested, and further requests to shutdown (or start)
         # are denied
@@ -104,6 +116,9 @@ class NodeController(NativeProcess):
         # under error or unnormal conditions. this flag controls the final exit
         # code returned by crossbar: 0 in case of "clean shutdown", and 1 otherwise
         self._shutdown_was_clean = None
+
+        # node-wide system monitor running here in the node controller
+        self._smonitor = SystemMonitor()
 
     def onConnect(self):
 
@@ -119,7 +134,7 @@ class NodeController(NativeProcess):
 
         from autobahn.wamp.types import SubscribeOptions
 
-        self.log.debug("Joined realm '{realm}' on node management router", realm=details.realm)
+        self.log.info("Joined realm '{realm}' on node management router", realm=details.realm)
 
         # When a (native) worker process has connected back to the router of
         # the node controller, the worker will publish this event
@@ -177,17 +192,52 @@ class NodeController(NativeProcess):
         """
         Return basic information about this node.
 
+        :param details: Call details.
+        :type details: :class:`autobahn.wamp.types.CallDetails`
+
         :returns: Information on the Crossbar.io node.
         :rtype: dict
         """
+        workers_by_type = {}
+        for worker in self._workers.values():
+            if worker.TYPE not in workers_by_type:
+                workers_by_type[worker.TYPE] = 0
+            workers_by_type[worker.TYPE] += 1
+
         return {
-            u'title': u'{} {}'.format(self.personality.TITLE, crossbar.__version__),
-            u'started': self._started,
-            u'controller_pid': self._pid,
-            u'running_workers': len(self._workers),
-            u'directory': self.cbdir,
-            u'pubkey': self._node._node_key.public_key(),
+            'title': u'{} {}'.format(self.personality.TITLE, crossbar.__version__),
+            'started': self._started,
+            'controller_pid': self._pid,
+            'running_workers': len(self._workers),
+            'workers_by_type': workers_by_type,
+            'directory': self.cbdir,
+            'pubkey': self._node._node_key.public_key(),
         }
+
+    @wamp.register(None)
+    def get_system_stats(self, details=None):
+        """
+        Return system statistics on this node.
+
+        :param details: Call details.
+        :type details: :class:`autobahn.wamp.types.CallDetails`
+
+        :return: Current system statistics for this node.
+        :rtype: dict
+        """
+        started = time_ns()
+        res = self._smonitor.poll()
+        us = int(round((time_ns() - started) / 1000.))
+
+        if us > 5000:
+            self.log.warn("{cls}.get_system_stats()->{mcls} excessive run-time of {duration}us!",
+                          cls=self.__class__.__name__, mcls=self._smonitor.__class__.__name__,
+                          duration=us)
+        else:
+            self.log.debug("{cls}.get_system_stats()->{mcls} ran in {duration}us",
+                           cls=self.__class__.__name__, mcls=self._smonitor.__class__.__name__,
+                           duration=us)
+        return res
 
     @wamp.register(None)
     @inlineCallbacks
@@ -252,14 +302,22 @@ class NodeController(NativeProcess):
         pass
 
     @wamp.register(None)
-    def get_workers(self, details=None):
+    def get_workers(self, filter_types=[], details=None):
         """
         Returns the list of workers currently running on this node.
 
+        :param filter_types:
         :returns: List of worker processes.
         :rtype: list[dict]
         """
-        return sorted(self._workers.keys())
+        assert filter_types is None or (type(filter_types) == list and type(ft) == str for ft in filter_types)
+
+        if filter_types:
+            ft = set(filter_types)
+            worker_ids = [worker_id for worker_id in self._workers if self._workers[worker_id].TYPE in ft]
+        else:
+            worker_ids = self._workers.keys()
+        return sorted(worker_ids)
 
     @wamp.register(None)
     def get_worker(self, worker_id, include_stats=False, details=None):
@@ -307,6 +365,10 @@ class NodeController(NativeProcess):
                       worker_type=worker_type,
                       worker_id=hlid(worker_id),
                       worker_klass=hltype(NodeController.start_worker))
+
+        if type(worker_id) != str or worker_id in [u'controller', u'']:
+            raise Exception('invalid worker ID "{}"'.format(worker_id))
+
         if worker_type == u'guest':
             return self._start_guest_worker(worker_id, worker_options, details=details)
 
@@ -448,8 +510,12 @@ class NodeController(NativeProcess):
             args.append("--debug-lifecycle")
         if self._node.options.debug_programflow:
             args.append("--debug-programflow")
+        if self._node.options.enable_vmprof:
+            args.append("--vmprof")
         if "shutdown" in options:
             args.extend(["--shutdown", options["shutdown"]])
+        if "restart" in options:
+            args.extend(["--restart", options["restart"]])
 
         # Node-level callback to inject worker arguments
         #

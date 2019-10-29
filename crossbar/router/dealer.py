@@ -36,6 +36,7 @@ import txaio
 from autobahn import util
 from autobahn.wamp import role, message, types
 from autobahn.wamp.exception import ProtocolError, ApplicationError
+from autobahn.exception import PayloadExceededError
 
 from autobahn.wamp.message import \
     _URI_PAT_STRICT_LAST_EMPTY, \
@@ -46,7 +47,8 @@ from autobahn.wamp.message import \
     _URI_PAT_LOOSE_EMPTY
 
 from crossbar.router.observation import UriObservationMap
-from crossbar.router import RouterOptions
+from crossbar.router import RouterOptions, NotAttached
+from crossbar.worker import rlink
 
 from txaio import make_logger
 
@@ -64,16 +66,18 @@ class InvocationRequest(object):
         'caller',
         'call',
         'callee',
+        'forward_for',
         'canceled',
         'error_msg',
     )
 
-    def __init__(self, id, registration, caller, call, callee):
+    def __init__(self, id, registration, caller, call, callee, forward_for):
         self.id = id
         self.registration = registration
         self.caller = caller
         self.call = call
         self.callee = callee
+        self.forward_for = forward_for
         self.canceled = False
         self.error_msg = None
 
@@ -222,6 +226,7 @@ class Dealer(object):
                 )
 
         if session in self._session_to_registrations:
+
             # send out Errors for any in-flight calls we have
             outstanding = self._callee_to_invocations.get(session, [])
             for invoke in outstanding:
@@ -258,9 +263,12 @@ class Dealer(object):
 
                     def _publish(registration):
                         service_session = self._router._realm.session
+
+                        # FIXME: what about exclude_authid as collected from forward_for? like we do elsewhere in this file!
                         options = types.PublishOptions(
                             correlation_id=None
                         )
+
                         if was_registered:
                             service_session.publish(
                                 u'wamp.registration.on_unregister',
@@ -268,6 +276,7 @@ class Dealer(object):
                                 registration.id,
                                 options=options,
                             )
+
                         if was_last_callee:
                             service_session.publish(
                                 u'wamp.registration.on_delete',
@@ -281,7 +290,7 @@ class Dealer(object):
             del self._session_to_registrations[session]
 
         else:
-            raise Exception(u"session with ID {} not attached".format(session._session_id))
+            raise NotAttached(u"session with ID {} not attached".format(session._session_id))
 
     def processRegister(self, session, register):
         """
@@ -290,6 +299,7 @@ class Dealer(object):
         # check topic URI: for SUBSCRIBE, must be valid URI (either strict or loose), and all
         # URI components must be non-empty other than for wildcard subscriptions
         #
+        is_rlink_session = isinstance(session, rlink.RLinkLocalSession)  # noqa
         if self._router.is_traced:
             if not register.correlation_id:
                 register.correlation_id = self._router.new_correlation_id()
@@ -348,9 +358,39 @@ class Dealer(object):
         d = self._router.authorize(session, register.procedure, u'register', options=register.marshal_options())
 
         def on_authorize_success(authorization):
+            # check the authorization before ANYTHING else, otherwise
+            # we may leak information about already-registered URIs
+            # etc.
+            if not authorization[u'allow']:
+                # error reply since session is not authorized to register
+                #
+                reply = message.Error(
+                    message.Register.MESSAGE_TYPE,
+                    register.request,
+                    ApplicationError.NOT_AUTHORIZED,
+                    [u"session is not authorized to register procedure '{0}'".format(register.procedure)],
+                )
+
             # get existing registration for procedure / matching strategy - if any
             #
             registration = self._registration_map.get_observation(register.procedure, register.match)
+
+            # if the session disconnected while the authorization was
+            # being checked, stop
+            if session not in self._session_to_registrations:
+                # if the session *really* disconnected, it won't have
+                # a _session_id any longer, so we double-check
+                if session._session_id is not None:
+                    self.log.error(
+                        "Session '{session_id}' still appears valid, but isn't in registration map",
+                        session_id=session._session_id,
+                    )
+                self.log.info(
+                    "Session vanished while registering '{procedure}'",
+                    procedure=register.procedure,
+                )
+                assert registration is None
+                return
 
             # if force_reregister was enabled, we only do any actual
             # kicking of existing registrations *after* authorization
@@ -399,12 +439,9 @@ class Dealer(object):
                     self._router.send(session, reply)
                     return
 
-            if not authorization[u'allow']:
-                # error reply since session is not authorized to register
-                #
-                reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.NOT_AUTHORIZED, [u"session is not authorized to register procedure '{0}'".format(register.procedure)])
-
-            else:
+            # this check is a little redundant, because theoretically
+            # we already returned (above) if this was False, but for safety...
+            if authorization[u'allow']:
                 registration = self._registration_map.get_observation(register.procedure, register.match)
                 if register.force_reregister and registration:
                     for obs in registration.observers:
@@ -447,14 +484,24 @@ class Dealer(object):
 
                     reply.correlation_is_last = False
 
+                    # when this message was forwarded from other nodes, exclude all such nodes
+                    # from receiving the meta event we'll publish below by authid (of the r2r link
+                    # from the forwarding node connected to this router node)
+                    exclude_authid = None
+                    if register.forward_for:
+                        exclude_authid = [ff['authid'] for ff in register.forward_for]
+                        self.log.info('WAMP meta event will be published excluding these authids (from forward_for): {exclude_authid}',
+                                      exclude_authid=exclude_authid)
+
                     def _publish():
                         service_session = self._router._realm.session
 
-                        if self._router.is_traced:
+                        if exclude_authid or self._router.is_traced:
                             options = types.PublishOptions(
                                 correlation_id=register.correlation_id,
                                 correlation_is_anchor=False,
                                 correlation_is_last=False,
+                                exclude_authid=exclude_authid,
                             )
                         else:
                             options = None
@@ -594,14 +641,25 @@ class Dealer(object):
 
             has_follow_up_messages = True
 
+            # when this message was forwarded from other nodes, exclude all such nodes
+            # from receiving the meta event we'll publish below by authid (of the r2r link
+            # from the forwarding node connected to this router node)
+            exclude_authid = None
+            if unregister.forward_for:
+                exclude_authid = [ff['authid'] for ff in unregister.forward_for]
+                self.log.info(
+                    'WAMP meta event will be published excluding these authids (from forward_for): {exclude_authid}',
+                    exclude_authid=exclude_authid)
+
             def _publish():
                 service_session = self._router._realm.session
 
-                if unregister and self._router.is_traced:
+                if unregister and (exclude_authid and self._router.is_traced):
                     options = types.PublishOptions(
                         correlation_id=unregister.correlation_id,
                         correlation_is_anchor=False,
-                        correlation_is_last=False
+                        correlation_is_last=False,
+                        exclude_authid=exclude_authid,
                     )
                 else:
                     options = None
@@ -703,6 +761,10 @@ class Dealer(object):
                 #
                 registration = self._registration_map.best_matching_observation(call.procedure)
 
+                # if the session disconencted while the authorization
+                # was being checked, 'registration' will be None and
+                # we'll (correctly) fire an error.
+
                 if registration:
 
                     # validate payload (skip in "payload_transparency" mode)
@@ -718,6 +780,9 @@ class Dealer(object):
                             reply.correlation_is_last = True
                             self._router.send(session, reply)
                             return
+
+                    # now actually perform the invocation of the callee ..
+                    #
                     self._call(session, call, registration, authorization)
                 else:
                     reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.NO_SUCH_PROCEDURE, [u"no callee registered for procedure <{0}>".format(call.procedure)])
@@ -862,18 +927,38 @@ class Dealer(object):
 
         # caller disclosure
         #
-        if authorization[u'disclose']:
+        if authorization.get(u'disclose', False):
             disclose = True
         elif (call.procedure.startswith(u"wamp.") or call.procedure.startswith(u"crossbar.")):
             disclose = True
         else:
             disclose = False
 
+        # set the disclosed caller and forward_for
+        #
+        forward_for = None
         if disclose:
-            caller = session._session_id
-            caller_authid = session._authid
-            caller_authrole = session._authrole
+            if call.forward_for:
+                # forwarded call: ultimate caller is the first in forward_for
+                caller = call.forward_for[0]['session']
+                caller_authid = call.forward_for[0]['authid']
+                caller_authrole = call.forward_for[0]['authrole']
+
+                # append this session (a r2r link) to forward_for
+                forward_for = call.forward_for + [
+                    {
+                        'session': session._session_id,
+                        'authid': session._authid,
+                        'authrole': session._authrole,
+                    }
+                ]
+            else:
+                # non-forwarded call: ultimate caller is this session
+                caller = session._session_id
+                caller_authid = session._authid
+                caller_authrole = session._authrole
         else:
+            # caller session isn't disclosed to the callee
             caller = None
             caller_authid = None
             caller_authrole = None
@@ -899,7 +984,7 @@ class Dealer(object):
                                             enc_algo=call.enc_algo,
                                             enc_key=call.enc_key,
                                             enc_serializer=call.enc_serializer,
-                                            forward_for=call.forward_for)
+                                            forward_for=forward_for)
         else:
             invocation = message.Invocation(invocation_request_id,
                                             registration.id,
@@ -911,23 +996,23 @@ class Dealer(object):
                                             caller_authid=caller_authid,
                                             caller_authrole=caller_authrole,
                                             procedure=procedure,
-                                            forward_for=call.forward_for)
+                                            forward_for=forward_for)
 
         invocation.correlation_id = call.correlation_id
         invocation.correlation_uri = call.procedure
         invocation.correlation_is_anchor = False
         invocation.correlation_is_last = False
 
-        self._add_invoke_request(invocation_request_id, registration, session, call, callee)
+        self._add_invoke_request(invocation_request_id, registration, session, call, callee, forward_for)
         self._router.send(callee, invocation)
         return True
 
-    def _add_invoke_request(self, invocation_request_id, registration, session, call, callee):
+    def _add_invoke_request(self, invocation_request_id, registration, session, call, callee, forward_for):
         """
         Internal helper.  Adds an InvocationRequest to both the
         _callee_to_invocations and _invocations maps.
         """
-        invoke_request = InvocationRequest(invocation_request_id, registration, session, call, callee)
+        invoke_request = InvocationRequest(invocation_request_id, registration, session, call, callee, forward_for)
         self._invocations[invocation_request_id] = invoke_request
         self._invocations_by_call[session._session_id, call.request] = invoke_request
         invokes = self._callee_to_invocations.get(callee, [])
@@ -1012,8 +1097,25 @@ class Dealer(object):
             # (XXX need test for ^ case)
 
             if cancellation_mode != message.Cancel.SKIP:
+
+                # FIXME
+                disclose = True
+                forward_for = None
+                if disclose:
+                    if cancel.forward_for:
+                        # append this calling session (a r2r link) to forward_for
+                        forward_for = cancel.forward_for + [
+                            {
+                                'session': session._session_id,
+                                'authid': session._authid,
+                                'authrole': session._authrole,
+                            }
+                        ]
+
                 interrupt_mode = cancellation_mode  # "kill" or "killnowait"
-                interrupt = message.Interrupt(invocation_request.id, interrupt_mode, forward_for=cancel.forward_for)
+                interrupt = message.Interrupt(invocation_request.id,
+                                              interrupt_mode,
+                                              forward_for=forward_for)
 
                 if self._router.is_traced:
                     interrupt.correlation_id = invocation_request.call.correlation_id
@@ -1066,6 +1168,38 @@ class Dealer(object):
 
             reply = None
 
+            # FIXME
+            disclose = True
+
+            # set the disclosed callee and forward_for
+            #
+            forward_for = None
+            if disclose:
+                if yield_.forward_for:
+                    # forwarded call result: ultimate callee is the first in forward_for
+                    callee = yield_.forward_for[0]['session']
+                    callee_authid = yield_.forward_for[0]['authid']
+                    callee_authrole = yield_.forward_for[0]['authrole']
+
+                    # append this session (a r2r link) to forward_for
+                    forward_for = yield_.forward_for + [
+                        {
+                            'session': session._session_id,
+                            'authid': session._authid,
+                            'authrole': session._authrole,
+                        }
+                    ]
+                else:
+                    # non-forwarded call result: ultimate callee is this session
+                    callee = session._session_id
+                    callee_authid = session._authid
+                    callee_authrole = session._authrole
+            else:
+                # callee session isn't disclosed to the caller
+                callee = None
+                callee_authid = None
+                callee_authrole = None
+
             # we've maybe cancelled this invocation
             if invocation_request.canceled:
                 # see if we're waiting to send the error back to the
@@ -1098,13 +1232,19 @@ class Dealer(object):
                                               invocation_request.call.request,
                                               ApplicationError.INVALID_ARGUMENT,
                                               [u"call result from procedure '{0}' with invalid application payload: {1}".format(invocation_request.call.procedure, e)],
-                                              forward_for=yield_.forward_for)
+                                              callee=callee,
+                                              callee_authid=callee_authid,
+                                              callee_authrole=callee_authrole,
+                                              forward_for=forward_for)
                     else:
                         reply = message.Result(invocation_request.call.request,
                                                args=yield_.args,
                                                kwargs=yield_.kwargs,
                                                progress=yield_.progress,
-                                               forward_for=yield_.forward_for)
+                                               callee=callee,
+                                               callee_authid=callee_authid,
+                                               callee_authrole=callee_authrole,
+                                               forward_for=forward_for)
                 else:
                     reply = message.Result(invocation_request.call.request,
                                            payload=yield_.payload,
@@ -1112,7 +1252,10 @@ class Dealer(object):
                                            enc_algo=yield_.enc_algo,
                                            enc_key=yield_.enc_key,
                                            enc_serializer=yield_.enc_serializer,
-                                           forward_for=yield_.forward_for)
+                                           callee=callee,
+                                           callee_authid=callee_authid,
+                                           callee_authrole=callee_authrole,
+                                           forward_for=forward_for)
 
                 # the call is done if it's a regular call (non-progressive) or if the payload was invalid
                 #
@@ -1129,7 +1272,29 @@ class Dealer(object):
                     reply.correlation_uri = invocation_request.call.correlation_uri
                     reply.correlation_is_anchor = False
                     reply.correlation_is_last = call_complete
-                self._router.send(invocation_request.caller, reply)
+                try:
+                    self._router.send(invocation_request.caller, reply)
+                except PayloadExceededError as e:
+                    # cannot send result to original caller as the result size surpasses the
+                    # transport limit (the maximum message size the original calling client is
+                    # willing to receive)
+                    call_complete = True
+                    reply = message.Error(message.Call.MESSAGE_TYPE,
+                                          invocation_request.call.request,
+                                          ApplicationError.INVALID_ARGUMENT,
+                                          [
+                                              u"call result from procedure '{0}' with invalid application payload: {1}".format(
+                                                  invocation_request.call.procedure, e)],
+                                          callee=callee,
+                                          callee_authid=callee_authid,
+                                          callee_authrole=callee_authrole,
+                                          forward_for=forward_for)
+                    reply.correlation_id = invocation_request.call.correlation_id
+                    reply.correlation_uri = invocation_request.call.correlation_uri
+                    reply.correlation_is_anchor = False
+                    reply.correlation_is_last = call_complete
+
+                    self._router.send(invocation_request.caller, reply)
 
             if call_complete:
                 # reduce current concurrency on callee
@@ -1158,7 +1323,9 @@ class Dealer(object):
                             self._call_store.pop_queued_call(invocation_request.registration)
 
         else:
-            raise ProtocolError(u"Dealer.onYield(): YIELD received for non-pending request ID {0}".format(yield_.request))
+            self.log.debug(
+                "Dealer.onYield(): YIELD received for non-pending request ID {request_id}",
+                request_id=yield_.request)
 
     def processInvocationError(self, session, error):
         """
@@ -1186,6 +1353,39 @@ class Dealer(object):
                 callee_extra.concurrency_current -= 1
 
             reply = None
+
+            # FIXME
+            disclose = False
+
+            # set the disclosed callee and forward_for
+            #
+            forward_for = None
+            if disclose:
+                if error.forward_for:
+                    # forwarded call: ultimate caller is the first in forward_for
+                    callee = invocation_request.forward_for[0]['session']
+                    callee_authid = invocation_request.forward_for[0]['authid']
+                    callee_authrole = invocation_request.forward_for[0]['authrole']
+
+                    # append this session (a r2r link) to forward_for
+                    forward_for = error.forward_for + [
+                        {
+                            'session': session._session_id,
+                            'authid': session._authid,
+                            'authrole': session._authrole,
+                        }
+                    ]
+                else:
+                    # non-forwarded call result: ultimate callee is this session
+                    callee = session._session_id
+                    callee_authid = session._authid
+                    callee_authrole = session._authrole
+            else:
+                # callee session isn't disclosed to the caller
+                callee = None
+                callee_authid = None
+                callee_authrole = None
+
             # we've maybe cancelled this invocation
             if invocation_request.canceled:
                 # see if we're waiting to send the error back to the
@@ -1203,14 +1403,20 @@ class Dealer(object):
                                               invocation_request.call.request,
                                               ApplicationError.INVALID_ARGUMENT,
                                               [u"call error from procedure '{0}' with invalid application payload: {1}".format(invocation_request.call.procedure, e)],
-                                              forward_for=error.forward_for)
+                                              callee=callee,
+                                              callee_authid=callee_authid,
+                                              callee_authrole=callee_authrole,
+                                              forward_for=forward_for)
                     else:
                         reply = message.Error(message.Call.MESSAGE_TYPE,
                                               invocation_request.call.request,
                                               error.error,
                                               args=error.args,
                                               kwargs=error.kwargs,
-                                              forward_for=error.forward_for)
+                                              callee=callee,
+                                              callee_authid=callee_authid,
+                                              callee_authrole=callee_authrole,
+                                              forward_for=forward_for)
                 else:
                     reply = message.Error(message.Call.MESSAGE_TYPE,
                                           invocation_request.call.request,
@@ -1219,19 +1425,20 @@ class Dealer(object):
                                           enc_algo=error.enc_algo,
                                           enc_key=error.enc_key,
                                           enc_serializer=error.enc_serializer,
-                                          forward_for=error.forward_for)
+                                          callee=callee,
+                                          callee_authid=callee_authid,
+                                          callee_authrole=callee_authrole,
+                                          forward_for=forward_for)
 
-            if reply:
+            # the calling session might have been lost in the meantime ..
+            #
+            if invocation_request.caller._transport and reply:
                 if self._router.is_traced:
                     reply.correlation_id = invocation_request.call.correlation_id
                     reply.correlation_uri = invocation_request.call.correlation_uri
                     reply.correlation_is_anchor = False
                     reply.correlation_is_last = True
-
-                # the calling session might have been lost in the meantime ..
-                #
-                if invocation_request.caller._transport:
-                    self._router.send(invocation_request.caller, reply)
+                self._router.send(invocation_request.caller, reply)
 
             # the call is done
             #
@@ -1239,4 +1446,8 @@ class Dealer(object):
             self._remove_invoke_request(invoke)
 
         else:
-            raise ProtocolError(u"Dealer.onInvocationError(): ERROR received for non-pending request_type {0} and request ID {1}".format(error.request_type, error.request))
+            self.log.debug(
+                "Dealer.onInvocationError(): ERROR received for non-pending request_type {request_type}"
+                " and request ID {request_id}",
+                request_type=error.request_type,
+                request_id=error.request)

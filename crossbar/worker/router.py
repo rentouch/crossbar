@@ -38,7 +38,7 @@ from twisted.python.failure import Failure
 from autobahn import wamp
 from autobahn.util import utcstr
 from autobahn.wamp.exception import ApplicationError
-from autobahn.wamp.types import PublishOptions, ComponentConfig
+from autobahn.wamp.types import PublishOptions, ComponentConfig, CallDetails, SessionIdent
 
 from crossbar._util import class_name, hltype, hlid
 
@@ -48,6 +48,7 @@ from crossbar.router.router import RouterFactory
 
 from crossbar.worker import _appsession_loader
 from crossbar.worker.controller import WorkerController
+from crossbar.worker.rlink import RLinkConfig
 
 
 __all__ = ('RouterController',)
@@ -195,6 +196,34 @@ class RouterController(WorkerController):
         return self.realms[realm_id].marshal()
 
     @wamp.register(None)
+    def get_router_realm_stats(self, realm_id=None, details=None):
+        """
+        Return realm messaging statistics.
+
+        :param details: Call details.
+        :type details: :class:`autobahn.wamp.types.CallDetails`
+
+        :returns: realm statistics object
+        :rtype: dict
+        """
+        self.log.debug("{name}.get_router_realm_stats(realm_id={realm_id})", name=self.__class__.__name__, realm_id=realm_id)
+
+        if realm_id is not None and realm_id not in self.realms:
+            raise ApplicationError(u"crossbar.error.no_such_object", "No realm with ID '{}'".format(realm_id))
+
+        if realm_id:
+            realm_ids = [realm_id]
+        else:
+            realm_ids = self.realms.keys()
+
+        res = {}
+        for realm_id in realm_ids:
+            realm = self.realms[realm_id]
+            res[realm_id] = realm.router.stats()
+
+        return res
+
+    @wamp.register(None)
     @inlineCallbacks
     def start_router_realm(self, realm_id, realm_config, details=None):
         """
@@ -229,7 +258,7 @@ class RouterController(WorkerController):
             raise ApplicationError(u"crossbar.error.invalid_configuration", emsg)
 
         # URI of the realm to start
-        realm = realm_config['name']
+        realm_name = realm_config['name']
 
         # router/realm wide options
         options = realm_config.get('options', {})
@@ -247,13 +276,13 @@ class RouterController(WorkerController):
         # track realm
         rlm = self.router_realm_class(self, realm_id, realm_config)
         self.realms[realm_id] = rlm
-        self.realm_to_id[realm] = realm_id
+        self.realm_to_id[realm_name] = realm_id
 
         # create a new router for the realm
-        router = self._router_factory.start_realm(rlm)
+        rlm.router = self._router_factory.start_realm(rlm)
 
-        if router._store and hasattr(router._store, 'start'):
-            yield router._store.start()
+        if rlm.router._store and hasattr(rlm.router._store, 'start'):
+            yield rlm.router._store.start()
 
         # add a router/realm service session
         extra = {
@@ -271,17 +300,28 @@ class RouterController(WorkerController):
             # the WAMP meta API is exposed to additionally, when the bridge_meta_api option is set
             'management_session': self,
         }
-        cfg = ComponentConfig(realm, extra)
-        rlm.session = RouterServiceAgent(cfg, router)
-        self._router_session_factory.add(rlm.session, authrole=u'trusted')
+        cfg = ComponentConfig(realm_name, extra)
+        rlm.session = RouterServiceAgent(cfg, rlm.router)
+        self._router_session_factory.add(rlm.session,
+                                         rlm.router,
+                                         authid=u'routerworker-{}-realm-{}-serviceagent'.format(self._worker_id, realm_id),
+                                         authrole=u'trusted')
 
         yield extra['onready']
-
-        self.log.info('Realm "{realm_id}" (name="{realm_name}") started', realm_id=realm_id, realm_name=rlm.session._realm)
+        self.log.info('RouterServiceAgent started on realm "{realm_name}"', realm_name=realm_name)
 
         self.publish(u'{}.on_realm_started'.format(self._uri_prefix), realm_id)
 
+        topic = u'{}.on_realm_started'.format(self._uri_prefix)
+        event = rlm.marshal()
+        caller = details.caller if details else None
+        self.publish(topic, event, options=PublishOptions(exclude=caller))
+
+        self.log.info('Realm "{realm_id}" (name="{realm_name}") started', realm_id=realm_id, realm_name=rlm.session._realm)
+        return event
+
     @wamp.register(None)
+    @inlineCallbacks
     def stop_router_realm(self, realm_id, details=None):
         """
         Stop a realm currently running on this router worker.
@@ -303,6 +343,11 @@ class RouterController(WorkerController):
         rlm = self.realms[realm_id]
         realm_name = rlm.config['name']
 
+        # stop the RouterServiceAgent living on the realm
+        yield rlm.session.leave()
+        self._router_session_factory.remove(rlm.session)
+        self.log.info('RouterServiceAgent stopped on realm "{realm_name}"', realm_name=realm_name)
+
         detached_sessions = self._router_factory.stop_realm(realm_name)
 
         del self.realms[realm_id]
@@ -315,15 +360,15 @@ class RouterController(WorkerController):
         }
 
         self.publish(u'{}.on_realm_stopped'.format(self._uri_prefix), realm_id)
-        return realm_stopped
+        returnValue(realm_stopped)
 
     @wamp.register(None)
-    def get_router_realm_roles(self, id, details=None):
+    def get_router_realm_roles(self, realm_id, details=None):
         """
         Get roles currently running on a realm running on this router worker.
 
-        :param id: The ID of the realm to list roles for.
-        :type id: str
+        :param realm_id: The ID of the realm to list roles for.
+        :type realm_id: str
 
         :param details: Call details.
         :type details: :class:`autobahn.wamp.types.CallDetails`
@@ -331,12 +376,40 @@ class RouterController(WorkerController):
         :returns: A list of roles.
         :rtype: list[dict]
         """
-        self.log.debug("{name}.get_router_realm_roles({id})", name=self.__class__.__name__, id=id)
+        self.log.debug("{name}.get_router_realm_roles({realm_id})", name=self.__class__.__name__, realm_id=realm_id)
 
-        if id not in self.realms:
-            raise ApplicationError(u"crossbar.error.no_such_object", "No realm with ID '{}'".format(id))
+        if realm_id not in self.realms:
+            raise ApplicationError(u"crossbar.error.no_such_object", "No realm with ID '{}'".format(realm_id))
 
-        return self.realms[id].roles.values()
+        return self.realms[realm_id].roles.values()
+
+    @wamp.register(None)
+    def get_router_realm_role(self, realm_id, role_id, details=None):
+        """
+        Return role detail information.
+
+        :param realm_id: The ID of the realm to get a role for.
+        :type realm_id: str
+
+        :param role_id: The ID of the role to get.
+        :type role_id: str
+
+        :param details: Call details.
+        :type details: :class:`autobahn.wamp.types.CallDetails`
+
+        :returns: role information object
+        :rtype: dict
+        """
+        self.log.debug("{name}.get_router_realm_role(realm_id={realm_id}, role_id={role_id})",
+                       name=self.__class__.__name__, realm_id=realm_id, role_id=role_id)
+
+        if realm_id not in self.realms:
+            raise ApplicationError(u"crossbar.error.no_such_object", "No realm with ID '{}'".format(realm_id))
+
+        if role_id not in self.realms[realm_id].roles:
+            raise ApplicationError(u"crossbar.error.no_such_object", "No role with ID '{}' on realm '{}'".format(role_id, realm_id))
+
+        return self.realms[realm_id].roles[role_id].marshal()
 
     @wamp.register(None)
     def start_router_realm_role(self, realm_id, role_id, role_config, details=None):
@@ -370,21 +443,20 @@ class RouterController(WorkerController):
         self._router_factory.add_role(realm, role_config)
 
         topic = u'{}.on_router_realm_role_started'.format(self._uri_prefix)
-        event = {
-            u'id': role_id
-        }
+        event = self.realms[realm_id].roles[role_id].marshal()
         caller = details.caller if details else None
         self.publish(topic, event, options=PublishOptions(exclude=caller))
 
         self.log.info('role {role_id} on realm {realm_id} started', realm_id=realm_id, role_id=role_id, role_config=role_config)
+        return event
 
     @wamp.register(None)
-    def stop_router_realm_role(self, id, role_id, details=None):
+    def stop_router_realm_role(self, realm_id, role_id, details=None):
         """
         Stop a role currently running on a realm running on this router worker.
 
-        :param id: The ID of the realm of the role to be stopped.
-        :type id: str
+        :param realm_id: The ID of the realm of the role to be stopped.
+        :type realm_id: str
 
         :param role_id: The ID of the role to be stopped.
         :type role_id: str
@@ -394,20 +466,21 @@ class RouterController(WorkerController):
         """
         self.log.debug("{name}.stop_router_realm_role", name=self.__class__.__name__)
 
-        if id not in self.realms:
-            raise ApplicationError(u"crossbar.error.no_such_object", "No realm with ID '{}'".format(id))
+        if realm_id not in self.realms:
+            raise ApplicationError(u"crossbar.error.no_such_object", "No realm with ID '{}'".format(realm_id))
 
-        if role_id not in self.realms[id].roles:
-            raise ApplicationError(u"crossbar.error.no_such_object", "No role with ID '{}' in realm with ID '{}'".format(role_id, id))
+        if role_id not in self.realms[realm_id].roles:
+            raise ApplicationError(u"crossbar.error.no_such_object", "No role with ID '{}' in realm with ID '{}'".format(role_id, realm_id))
 
-        del self.realms[id].roles[role_id]
+        role = self.realms[realm_id].roles.pop(role_id)
 
         topic = u'{}.on_router_realm_role_stopped'.format(self._uri_prefix)
-        event = {
-            u'id': role_id
-        }
+        event = role.marshal()
         caller = details.caller if details else None
         self.publish(topic, event, options=PublishOptions(exclude=caller))
+
+        self.log.info('role {role_id} on realm {realm_id} stopped', realm_id=realm_id, role_id=role_id)
+        return event
 
     @wamp.register(None)
     def get_router_components(self, details=None):
@@ -473,6 +546,8 @@ class RouterController(WorkerController):
             emsg = "Could not start component: a component with ID '{}'' is already running (or starting)".format(id)
             self.log.error(emsg)
             raise ApplicationError(u'crossbar.error.already_running', emsg)
+
+        started_d = Deferred()
 
         # check configuration
         #
@@ -573,9 +648,34 @@ class RouterController(WorkerController):
             event = {u'id': id}
             caller = details.caller if details else None
             self.publish(topic, event, options=PublishOptions(exclude=caller))
+            if not started_d.called:
+                started_d.errback(Exception("Session left before being ready"))
+            return event
+
+        def publish_ready(session):
+            """
+            when our component is ready, we publish .on_component_ready
+            """
+            self.log.info(
+                "component ready: {session} id={session_id}",
+                session=class_name(session),
+                session_id=session._session_id,
+            )
+            topic = self._uri_prefix + '.on_component_ready'
+            event = {u'id': id}
+            self.publish(topic, event)
+            started_d.callback(event)
             return event
 
         def publish_started(session, start_details):
+            """
+            when our component starts, we publish .on_component_start
+            """
+
+            # hook up handlers for "session is ready"
+            session.on('ready', publish_ready)
+
+            # publish .on_component_start
             self.log.info(
                 "started component: {session} id={session_id}",
                 session=class_name(session),
@@ -591,12 +691,14 @@ class RouterController(WorkerController):
         session.on('join', publish_started)
 
         self.components[id] = RouterComponent(id, config, session)
-        self._router_session_factory.add(session, authrole=config.get('role', u'anonymous'))
+        router = self._router_factory.get(realm)
+        self._router_session_factory.add(session, router, authrole=config.get('role', u'anonymous'))
         self.log.debug(
             "Added component {id} (type '{name}')",
             id=id,
             name=class_name(session),
         )
+        return started_d
 
     @wamp.register(None)
     def stop_router_component(self, id, details=None):
@@ -638,12 +740,28 @@ class RouterController(WorkerController):
 
         res = []
         for transport in sorted(self.transports.values(), key=lambda c: c.created):
-            res.append({
-                u'id': transport.id,
-                u'created': utcstr(transport.created),
-                u'config': transport.config,
-            })
+            res.append(transport.marshal())
         return res
+
+    @wamp.register(None)
+    def get_router_transport(self, transport_id, details=None):
+        """
+        Get transports currently running in this router worker.
+
+        :param details: Call details.
+        :type details: :class:`autobahn.wamp.types.CallDetails`
+
+        :returns: List of transports currently running.
+        :rtype: list[dict]
+        """
+        self.log.debug("{name}.get_router_transport", name=self.__class__.__name__)
+
+        if transport_id in self.transports:
+            transport = self.transports[transport_id]
+            obj = transport.marshal()
+            return obj
+        else:
+            raise ApplicationError(u"crossbar.error.no_such_object", "No transport {}".format(transport_id))
 
     @wamp.register(None)
     def start_router_transport(self, transport_id, config, create_paths=False, details=None):
@@ -692,6 +810,8 @@ class RouterController(WorkerController):
             topic = u'{}.on_router_transport_started'.format(self._uri_prefix)
             self.publish(topic, event, options=PublishOptions(exclude=caller))
 
+            return router_transport.marshal()
+
         def fail(err):
             _emsg = "Cannot listen on transport endpoint: {log_failure}"
             self.log.error(_emsg, log_failure=err)
@@ -727,9 +847,7 @@ class RouterController(WorkerController):
         self.log.debug("Stopping transport with ID '{transport_id}'", transport_id=transport_id)
 
         caller = details.caller if details else None
-        event = {
-            u'id': transport_id
-        }
+        event = router_transport.marshal()
         topic = u'{}.on_router_transport_stopping'.format(self._uri_prefix)
         self.publish(topic, event, options=PublishOptions(exclude=caller))
 
@@ -742,9 +860,12 @@ class RouterController(WorkerController):
             topic = u'{}.on_router_transport_stopped'.format(self._uri_prefix)
             self.publish(topic, event, options=PublishOptions(exclude=caller))
 
+            return event
+
         def fail(err):
             emsg = "Cannot stop listening on transport endpoint: {log_failure}"
             self.log.error(emsg, log_failure=err)
+
             raise ApplicationError(u"crossbar.error.cannot_stop", emsg)
 
         d.addCallbacks(ok, fail)
@@ -853,7 +974,7 @@ class RouterController(WorkerController):
             self.log.error(emsg)
             raise ApplicationError(u'crossbar.error.not_running', emsg)
 
-        if path not in transport:
+        if path not in transport.root:
             emsg = "Cannot stop service on Web transport {}: no service running on path '{}'".format(transport_id, path)
             self.log.error(emsg)
             raise ApplicationError(u'crossbar.error.not_running', emsg)
@@ -864,9 +985,9 @@ class RouterController(WorkerController):
                      path,
                      options=PublishOptions(exclude=caller))
 
-        # now actually remove the web service ..
-        # Note: currently this is NOT async, but direct/sync.
-        transport.remove_web_service(path)
+        # now actually remove the web service. note: currently this is NOT async, but direct/sync.
+        # FIXME: check that the underlying Twisted Web resource doesn't need any stopping too!
+        del transport.root[path]
 
         on_web_transport_service_stopped = {
             u'transport_id': transport_id,
@@ -878,3 +999,221 @@ class RouterController(WorkerController):
                      path,
                      on_web_transport_service_stopped,
                      options=PublishOptions(exclude=caller))
+
+        return on_web_transport_service_stopped
+
+    @wamp.register(None)
+    def get_web_transport_service(self, transport_id, path, details=None):
+        self.log.info("{name}.get_web_transport_service(transport_id={transport_id}, path={path})",
+                      name=self.__class__.__name__,
+                      transport_id=transport_id,
+                      path=path)
+
+        transport = self.transports.get(transport_id, None)
+        if not transport or \
+           not isinstance(transport, self.personality.RouterWebTransport) or \
+           transport.state != self.personality.RouterTransport.STATE_STARTED:
+            emsg = "No transport with ID '{}' or transport is not a Web transport".format(transport_id)
+            self.log.debug(emsg)
+            raise ApplicationError(u'crossbar.error.not_running', emsg)
+
+        if path not in transport.root:
+            emsg = "Web transport {}: no service running on path '{}'".format(transport_id, path)
+            self.log.debug(emsg)
+            raise ApplicationError(u'crossbar.error.not_running', emsg)
+
+        obj = {
+            'path': transport.path,
+            'config': transport.config,
+        }
+        return obj
+
+    @wamp.register(None)
+    def kill_by_authid(self, realm_id, authid, reason, message=None, details=None):
+        self.log.info('Killing sessions by authid="{authid}" ..',
+                      realm_id=hlid(realm_id), authid=hlid(authid),
+                      method=hltype(RouterController.start_router_realm))
+
+        if realm_id not in self.realms:
+            raise ApplicationError(u"crossbar.error.no_such_object", "No realm with ID '{}'".format(realm_id))
+
+        # forward call directly to service agent
+        return self.realms[realm_id].session.session_kill_by_authid(authid, reason, message=message, details=details)
+
+    @wamp.register(None)
+    def get_router_realm_links(self, realm_id, details=None):
+        """
+        Returns the currently running routing links to remote router realms.
+
+        :param realm_id: The ID of the (local) realm to get links for.
+        :type realm_id: str
+
+        :returns: List of router link IDs.
+        :rtype: list[str]
+        """
+        assert type(realm_id) == str
+        assert isinstance(details, CallDetails)
+
+        self.log.info(
+            'Getting router links for realm {realm_id} {method}',
+            realm_id=hlid(realm_id),
+            method=hltype(RouterController.get_router_realm_links))
+
+        if realm_id not in self.realms:
+            raise ApplicationError(u"crossbar.error.no_such_object", "No realm with ID '{}'".format(realm_id))
+
+        rlink_manager = self.realms[realm_id].rlink_manager
+
+        return rlink_manager.keys()
+
+    @wamp.register(None)
+    def get_router_realm_link(self, realm_id, link_id, details=None):
+        """
+        Get router link detail information.
+
+        :param realm_id: The ID of the (local) realm of the link.
+        :type realm_id: str
+
+        :param link_id: The ID of the router link to return.
+        :type link_id: str
+
+        :returns: Router link detail information.
+        :rtype: dict
+        """
+        assert type(realm_id) == str
+        assert type(link_id) == str
+        assert isinstance(details, CallDetails)
+
+        self.log.info(
+            'Get router link {link_id} on realm {realm_id} {method}',
+            link_id=hlid(link_id),
+            realm_id=hlid(realm_id),
+            method=hltype(RouterController.get_router_realm_links))
+
+        if realm_id not in self.realms:
+            raise ApplicationError(u"crossbar.error.no_such_object", "No realm with ID '{}'".format(realm_id))
+
+        rlink_manager = self.realms[realm_id].rlink_manager
+
+        if link_id not in rlink_manager:
+            raise ApplicationError(u"crossbar.error.no_such_object", "No link with ID '{}'".format(link_id))
+
+        rlink = rlink_manager[link_id]
+
+        return rlink.marshal()
+
+    @wamp.register(None)
+    @inlineCallbacks
+    def start_router_realm_link(self, realm_id, link_id, link_config, details=None):
+        """
+        Start a new router link to a remote router on a (local) realm.
+
+        The link configuration (``link_config``) must include the transport definition
+        to the remote router. Here is an example:
+
+        .. code-block:: json
+
+            {
+                "realm": "realm1",
+                "transport": {
+                    "type": "websocket",
+                    "endpoint": {
+                        "type": "tcp",
+                        "host": "localhost",
+                        "port": 8002
+                    },
+                    "url": "ws://localhost:8002/ws"
+                }
+            }
+
+        :param realm_id: The ID of the (local) realm on which to start the link.
+        :type realm_id: str
+
+        :param link_id: The ID of the router link to start.
+        :type link_id: str
+
+        :param link_config: The router link configuration.
+        :type link_config: dict
+
+        :returns: The new link detail information.
+        :rtype: dict
+        """
+        assert type(realm_id) == str
+        assert type(link_id) == str
+        assert type(link_config) == dict
+        assert isinstance(details, CallDetails)
+
+        self.log.info(
+            'Router link {link_id} starting on realm {realm_id} {method}',
+            link_id=hlid(link_id),
+            realm_id=hlid(realm_id),
+            method=hltype(RouterController.start_router_realm_link))
+
+        if realm_id not in self.realms:
+            raise ApplicationError('crossbar.error.no_such_object', 'no realm with ID {}'.format(realm_id))
+
+        rlink_manager = self.realms[realm_id].rlink_manager
+
+        if link_id in rlink_manager:
+            raise ApplicationError('crossbar.error.already_running',
+                                   'router link {} already running'.format(link_id))
+
+        link_config = RLinkConfig.parse(self.personality, link_config, id=link_id)
+
+        caller = SessionIdent.from_calldetails(details)
+
+        rlink = yield rlink_manager.start_link(link_id, link_config, caller)
+
+        started = rlink.marshal()
+
+        self.publish(u'{}.on_router_realm_link_started'.format(self._uri_prefix), started)
+
+        self.log.info('Router link {link_id} started', link_id=hlid(link_id))
+
+        returnValue(started)
+
+    @wamp.register(None)
+    @inlineCallbacks
+    def stop_router_realm_link(self, realm_id, link_id, details=None):
+        """
+        Stop a currently running router link.
+
+        :param realm_id: The ID of the (local) realm on which the link is running that is to be stopped.
+        :type realm_id: str
+
+        :param link_id: The ID of the router link to stop.
+        :type link_id: str
+
+        :returns: The stopped link detail information.
+        :rtype: dict
+        """
+        assert type(realm_id) == str
+        assert type(link_id) == str
+        assert isinstance(details, CallDetails)
+
+        self.log.info(
+            'Router link {link_id} stopping on realm {realm_id} {method}',
+            link_id=hlid(link_id),
+            realm_id=hlid(realm_id),
+            method=hltype(RouterController.stop_router_realm_link))
+
+        if realm_id not in self.realms:
+            raise ApplicationError('crossbar.error.no_such_object', 'no realm with ID {}'.format(realm_id))
+
+        rlink_manager = self.realms[realm_id].rlink_manager
+
+        if link_id not in self.rlink_manager:
+            raise ApplicationError('crossbar.error.no_such_object',
+                                   'no router link with ID {}'.format(link_id))
+
+        caller = SessionIdent.from_calldetails(details)
+
+        rlink = yield rlink_manager.stop_link(link_id, caller)
+
+        stopped = rlink.marshal()
+
+        self.publish(u'{}.on_router_realm_link_stopped'.format(self._uri_prefix), stopped)
+
+        self.log.info('Router link {link_id} stopped', link_id=hlid(link_id))
+
+        returnValue(stopped)

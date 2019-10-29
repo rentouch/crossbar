@@ -41,7 +41,6 @@ import sys
 import pkg_resources
 
 import txaio
-
 txaio.use_twisted()  # noqa
 
 from txaio import make_logger, start_logging, set_global_log_level, failure_format_traceback
@@ -55,7 +54,7 @@ from crossbar._logging import make_logfile_observer
 from crossbar._logging import make_stdout_observer
 from crossbar._logging import make_stderr_observer
 from crossbar._logging import LogLevel
-from crossbar.common.key import _maybe_generate_key
+from crossbar.common.key import _maybe_generate_key, _read_node_key, _read_release_key
 
 import crossbar
 
@@ -66,6 +65,12 @@ from autobahn.websocket.xormasker import XorMaskerNull
 from crossbar.node.template import Templates
 from crossbar.common.checkconfig import color_json, InvalidConfigException
 from crossbar.worker import main as worker_main
+
+try:
+    import vmprof
+    _HAS_VMPROF = True
+except ImportError:
+    _HAS_VMPROF = False
 
 try:
     import psutil
@@ -100,10 +105,23 @@ def _get_version(name_or_module):
     if isinstance(name_or_module, str):
         name_or_module = importlib.import_module(name_or_module)
 
-    try:
-        return name_or_module.__version__
-    except AttributeError:
-        return ''
+    if hasattr(name_or_module, '__version__'):
+        v = name_or_module.__version__
+    elif hasattr(name_or_module, 'version'):
+        v = name_or_module.version
+    else:
+        try:
+            v = pkg_resources.get_distribution(name_or_module.__name__).version
+        except:
+            # eg flatbuffers when run from single file EXE (pyinstaller): https://github.com/google/flatbuffers/issues/5299
+            v = '?.?.?'
+
+    if type(v) in (tuple, list):
+        return '.'.join(str(x) for x in v)
+    elif type(v) == str:
+        return v
+    else:
+        raise RuntimeError('unexpected type {} for version in module "{}"'.format(type(v), name_or_module))
 
 
 def _check_pid_exists(pid):
@@ -215,68 +233,145 @@ def _check_is_running(cbdir):
     return None
 
 
-def _run_command_legal(options, reactor, personality):
+def _run_command_legal(options, reactor, personality, verbose=True):
     """
     Subcommand "crossbar legal".
     """
-    package, resource_name = personality.LEGAL
-    filename = pkg_resources.resource_filename(package, resource_name)
-    filepath = os.path.abspath(filename)
-    with open(filepath) as f:
-        legal = f.read()
-        print(legal)
+    if verbose:
+        docs = [personality.LEGAL,
+                personality.LICENSE,
+                personality.LICENSE_FOR_API,
+                personality.LICENSES_OSS]
+    else:
+        docs = [personality.LEGAL]
+
+    print(hl('*' * 120, bold=True, color='yellow'))
+    for package, resource_name in docs:
+        filename = pkg_resources.resource_filename(package, resource_name)
+        filepath = os.path.abspath(filename)
+        print(hl('   ' + filepath + ' :\n', bold=False, color='yellow'))
+        with open(filepath) as f:
+            legal = f.read()
+            print(hl(legal, bold=True, color='white'))
+        print(hl('*' * 120, bold=True, color='yellow'))
 
 
-def _run_command_version(options, reactor, personality):
-    """
-    Subcommand "crossbar version".
-    """
-    log = make_logger()
+class Versions(object):
+    def __init__(self):
+        self.executable = ''
+        self.platform = ''
+        self.machine = ''
+        self.py_ver = ''
+        self.py_ver_string = ''
+        self.py_ver_detail = ''
+        self.py_is_frozen = ''
+        self.tx_ver = ''
+        self.tx_loc = ''
+        self.txaio_ver = ''
+        self.ab_ver = ''
+        self.ab_loc = ''
+        self.utf8_ver = ''
+        self.utf8_loc = ''
+        self.xor_ver = ''
+        self.xor_loc = ''
+        self.json_ver = ''
+        self.msgpack_ver = ''
+        self.cbor_ver = ''
+        self.ubjson_ver = ''
+        self.flatbuffers_ver = ''
+        self.lmdb_ver = ''
+        self.crossbar_ver = ''
+        self.crossbarfx_ver = ''
+        self.numpy_ver = ''
+        self.zlmdb_ver = ''
+        self.release_pubkey = ''
+        self.supported_serializers = ''
+
+    def marshal(self):
+        obj = {}
+        obj['executable'] = self.executable
+        obj['platform'] = self.platform
+        obj['machine'] = self.machine
+        obj['py_ver'] = self.py_ver
+        obj['py_ver_string'] = self.py_ver_string
+        obj['py_ver_detail'] = self.py_ver_detail
+        obj['py_is_frozen'] = self.py_is_frozen
+        obj['tx_ver'] = self.tx_ver
+        obj['tx_loc'] = self.tx_loc
+        obj['txaio_ver'] = self.txaio_ver
+        obj['ab_ver'] = self.ab_ver
+        obj['ab_loc'] = self.ab_loc
+        obj['utf8_ver'] = self.utf8_ver
+        obj['utf8_loc'] = self.utf8_loc
+        obj['xor_ver'] = self.xor_ver
+        obj['xor_loc'] = self.xor_loc
+        obj['json_ver'] = self.json_ver
+        obj['msgpack_ver'] = self.msgpack_ver
+        obj['cbor_ver'] = self.cbor_ver
+        obj['ubjson_ver'] = self.ubjson_ver
+        obj['flatbuffers_ver'] = self.flatbuffers_ver
+        obj['lmdb_ver'] = self.lmdb_ver
+        obj['crossbar_ver'] = self.crossbar_ver
+        obj['crossbarfx_ver'] = self.crossbarfx_ver
+        obj['numpy_ver'] = self.numpy_ver
+        obj['zlmdb_ver'] = self.zlmdb_ver
+        obj['release_pubkey'] = self.release_pubkey
+        obj['supported_serializers'] = self.supported_serializers
+        return obj
+
+
+def _get_versions(reactor):
+    v = Versions()
+
+    v.executable = os.path.realpath(sys.executable)
+
+    v.platform = platform.platform()
+    v.machine = platform.machine()
 
     # Python
-    py_ver = '.'.join([str(x) for x in list(sys.version_info[:3])])
-    py_ver_string = "[%s]" % sys.version.replace('\n', ' ')
+    v.py_ver = '.'.join([str(x) for x in list(sys.version_info[:3])])
+    v.py_ver_string = "%s" % sys.version.replace('\n', ' ')
 
     if 'pypy_version_info' in sys.__dict__:
-        py_ver_detail = "{}-{}".format(platform.python_implementation(), '.'.join(str(x) for x in sys.pypy_version_info[:3]))
+        v.py_ver_detail = "{}-{}".format(platform.python_implementation(), '.'.join(str(x) for x in sys.pypy_version_info[:3]))
     else:
-        py_ver_detail = platform.python_implementation()
+        v.py_ver_detail = platform.python_implementation()
 
     # Pyinstaller (frozen EXE)
-    py_is_frozen = getattr(sys, 'frozen', False)
+    v.py_is_frozen = getattr(sys, 'frozen', False)
 
     # Twisted / Reactor
-    tx_ver = "%s-%s" % (_get_version('twisted'), reactor.__class__.__name__)
-    tx_loc = "[%s]" % qual(reactor.__class__)
+    v.tx_ver = "%s-%s" % (_get_version('twisted'), reactor.__class__.__name__)
+    v.tx_loc = "%s" % qual(reactor.__class__)
 
     # txaio
-    txaio_ver = _get_version('txaio')
+    v.txaio_ver = _get_version('txaio')
 
     # Autobahn
-    ab_ver = _get_version('autobahn')
-    ab_loc = "[%s]" % qual(WebSocketProtocol)
+    v.ab_ver = _get_version('autobahn')
+    v.ab_loc = "%s" % qual(WebSocketProtocol)
 
     # UTF8 Validator
     s = qual(Utf8Validator)
     if 'wsaccel' in s:
-        utf8_ver = 'wsaccel-%s' % _get_version('wsaccel')
+        v.utf8_ver = 'wsaccel-%s' % _get_version('wsaccel')
     elif s.startswith('autobahn'):
-        utf8_ver = 'autobahn'
+        v.utf8_ver = 'autobahn'
     else:
         # could not detect UTF8 validator type/version
-        utf8_ver = '?'
-    utf8_loc = "[%s]" % qual(Utf8Validator)
+        v.utf8_ver = '?'
+    v.utf8_loc = "%s" % qual(Utf8Validator)
 
     # XOR Masker
     s = qual(XorMaskerNull)
     if 'wsaccel' in s:
-        xor_ver = 'wsaccel-%s' % _get_version('wsaccel')
+        v.xor_ver = 'wsaccel-%s' % _get_version('wsaccel')
     elif s.startswith('autobahn'):
-        xor_ver = 'autobahn'
+        v.xor_ver = 'autobahn'
     else:
         # could not detect XOR masker type/version
-        xor_ver = '?'
-    xor_loc = "[%s]" % qual(XorMaskerNull)
+        v.xor_ver = '?'
+    v.xor_loc = "%s" % qual(XorMaskerNull)
 
     # JSON Serializer
     supported_serializers = ['JSON']
@@ -285,107 +380,123 @@ def _run_command_version(options, reactor, personality):
 
     # If it's just 'json' then it's the stdlib one...
     if json_ver == 'json':
-        json_ver = 'stdlib'
+        v.json_ver = 'stdlib'
     else:
-        json_ver = (json_ver + "-%s") % _get_version(json_ver)
+        v.json_ver = (json_ver + "-%s") % _get_version(json_ver)
 
     # MsgPack Serializer
     try:
-        import umsgpack  # noqa
-        msgpack_ver = 'u-msgpack-python-%s' % _get_version(umsgpack)
+        from autobahn.wamp.serializer import MsgPackObjectSerializer
+        msgpack = MsgPackObjectSerializer.MSGPACK_MODULE
+        v.msgpack_ver = '{}-{}'.format(msgpack.__name__, _get_version(msgpack))
         supported_serializers.append('MessagePack')
     except ImportError:
-        msgpack_ver = '-'
+        pass
 
     # CBOR Serializer
     try:
-        import cbor  # noqa
-        cbor_ver = 'cbor-%s' % _get_version(cbor)
+        from autobahn.wamp.serializer import CBORObjectSerializer
+        cbor = CBORObjectSerializer.CBOR_MODULE
+        v.cbor_ver = '{}-{}'.format(cbor.__name__, _get_version(cbor))
         supported_serializers.append('CBOR')
     except ImportError:
-        cbor_ver = '-'
+        pass
 
     # UBJSON Serializer
     try:
-        import ubjson  # noqa
-        ubjson_ver = 'ubjson-%s' % _get_version(ubjson)
+        from autobahn.wamp.serializer import UBJSONObjectSerializer
+        ubjson = UBJSONObjectSerializer.UBJSON_MODULE
+        v.ubjson_ver = '{}-{}'.format(ubjson.__name__, _get_version(ubjson))
         supported_serializers.append('UBJSON')
     except ImportError:
-        ubjson_ver = '-'
+        pass
+
+    # Flatbuffers Serializer
+    try:
+        from autobahn.wamp.serializer import FlatBuffersObjectSerializer
+        flatbuffers = FlatBuffersObjectSerializer.FLATBUFFERS_MODULE
+        v.flatbuffers_ver = '{}-{}'.format(flatbuffers.__name__, _get_version(flatbuffers))
+        supported_serializers.append('Flatbuffers')
+    except ImportError:
+        pass
+
+    v.supported_serializers = supported_serializers
 
     # LMDB
     try:
         import lmdb  # noqa
         lmdb_lib_ver = '.'.join([str(x) for x in lmdb.version()])
-        lmdb_ver = '{}/lmdb-{}'.format(_get_version(lmdb), lmdb_lib_ver)
+        v.lmdb_ver = '{}/lmdb-{}'.format(_get_version(lmdb), lmdb_lib_ver)
     except ImportError:
-        lmdb_ver = '-'
+        pass
+
+    # crossbar
+    v.crossbar_ver = crossbar.__version__
 
     # crossbarfx
     try:
-        from crossbarfx._version import __version__ as crossbarfx_ver  # noqa
+        import crossbarfx  # noqa
+        v.crossbarfx_ver = _get_version(crossbarfx)
     except ImportError:
-        crossbarfx_ver = '-'
-
-    # txaio-etcd
-    try:
-        import txaioetcd  # noqa
-        txaioetcd_ver = _get_version(txaioetcd)
-    except ImportError:
-        txaioetcd_ver = '-'
-
-    # xbr
-    try:
-        import xbr  # noqa
-        xbr_ver = _get_version(xbr)
-    except ImportError:
-        xbr_ver = '-'
+        pass
 
     # zlmdb
     try:
         import zlmdb  # noqa
-        zlmdb_ver = _get_version(zlmdb)
+        v.zlmdb_ver = _get_version(zlmdb)
     except ImportError:
-        zlmdb_ver = '-'
+        pass
+
+    # numpy
+    try:
+        import numpy  # noqa
+        v.numpy_ver = _get_version(numpy)
+    except ImportError:
+        pass
 
     # Release Public Key
     from crossbar.common.key import _read_release_key
     release_pubkey = _read_release_key()
+    v.release_pubkey = release_pubkey[u'base64']
+
+    return v
+
+
+def _run_command_version(options, reactor, personality):
+    """
+    Subcommand "crossbar version".
+    """
+    log = make_logger()
+
+    v = _get_versions(reactor)
 
     def decorate(text, fg='white', bg=None, bold=True):
         return click.style(text, fg=fg, bg=bg, bold=bold)
 
-    pad = " " * 22
     for line in personality.BANNER.splitlines():
         log.info(hl(line, color='yellow', bold=True))
     log.info("")
-    log.info(" Crossbar.io        : {ver}", ver=decorate(crossbar.__version__))
-    log.info("   txaio            : {ver}", ver=decorate(txaio_ver))
-    log.info("   Autobahn         : {ver}", ver=decorate(ab_ver))
-    log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(ab_loc))
-    log.debug("     UTF8 Validator : {ver}", ver=decorate(utf8_ver))
-    log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(utf8_loc))
-    log.debug("     XOR Masker     : {ver}", ver=decorate(xor_ver))
-    log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(xor_loc))
-    log.debug("     JSON Codec     : {ver}", ver=decorate(json_ver))
-    log.debug("     MsgPack Codec  : {ver}", ver=decorate(msgpack_ver))
-    log.debug("     CBOR Codec     : {ver}", ver=decorate(cbor_ver))
-    log.debug("     UBJSON Codec   : {ver}", ver=decorate(ubjson_ver))
-    log.info("   Twisted          : {ver}", ver=decorate(tx_ver))
-    log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(tx_loc))
-    log.info("   LMDB             : {ver}", ver=decorate(lmdb_ver))
-    log.info("   Python           : {ver}/{impl}", ver=decorate(py_ver), impl=decorate(py_ver_detail))
-    log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(py_ver_string))
+    log.info(" Crossbar.io        : {ver}", ver=decorate(v.crossbar_ver))
+    log.info("   txaio            : {ver}", ver=decorate(v.txaio_ver))
+    log.info("   Autobahn         : {ver}", ver=decorate(v.ab_ver))
+    log.info("     UTF8 Validator : {ver}", ver=decorate(v.utf8_ver))
+    log.info("     XOR Masker     : {ver}", ver=decorate(v.xor_ver))
+    log.info("     JSON Codec     : {ver}", ver=decorate(v.json_ver))
+    log.info("     MsgPack Codec  : {ver}", ver=decorate(v.msgpack_ver))
+    log.info("     CBOR Codec     : {ver}", ver=decorate(v.cbor_ver))
+    log.info("     UBJSON Codec   : {ver}", ver=decorate(v.ubjson_ver))
+    log.info("     FlatBuffers    : {ver}", ver=decorate(v.flatbuffers_ver))
+    log.info("   Twisted          : {ver}", ver=decorate(v.tx_ver))
+    log.info("   LMDB             : {ver}", ver=decorate(v.lmdb_ver))
+    log.info("   Python           : {ver}/{impl}", ver=decorate(v.py_ver), impl=decorate(v.py_ver_detail))
     if personality.NAME in (u'edge', u'master'):
-        log.info(" Crossbar.io FX     : {ver}", ver=decorate(crossbarfx_ver))
-        if personality.NAME in (u'master'):
-            log.info("   txaio-etcd       : {ver}", ver=decorate(txaioetcd_ver))
-        log.info("   XBR              : {ver}", ver=decorate(xbr_ver))
-        log.info("   zLMDB            : {ver}", ver=decorate(zlmdb_ver))
-    log.info(" Frozen executable  : {py_is_frozen}", py_is_frozen=decorate('yes' if py_is_frozen else 'no'))
-    log.info(" Operating system   : {ver}", ver=decorate(platform.platform()))
-    log.info(" Host machine       : {ver}", ver=decorate(platform.machine()))
-    log.info(" Release key        : {release_pubkey}", release_pubkey=decorate(release_pubkey[u'base64']))
+        log.info(" CrossbarFX         : {ver}", ver=decorate(v.crossbarfx_ver))
+        log.info("   NumPy            : {ver}", ver=decorate(v.numpy_ver))
+        log.info("   zLMDB            : {ver}", ver=decorate(v.zlmdb_ver))
+    log.info(" Frozen executable  : {py_is_frozen}", py_is_frozen=decorate('yes' if v.py_is_frozen else 'no'))
+    log.info(" Operating system   : {ver}", ver=decorate(v.platform))
+    log.info(" Host machine       : {ver}", ver=decorate(v.machine))
+    log.info(" Release key        : {release_pubkey}", release_pubkey=decorate(v.release_pubkey))
     log.info("")
 
 
@@ -395,35 +506,31 @@ def _run_command_keys(options, reactor, personality):
     """
     log = make_logger()
 
-    from crossbar.common.key import _read_node_key
-    from crossbar.common.key import _read_release_key
+    # Generate a new node key pair (2 files), load and check
+    _maybe_generate_key(options.cbdir)
 
-    if options.generate:
-        # Generate a new node key pair (2 files), load and check
-        _maybe_generate_key(options.cbdir)
+    # Print keys
+
+    # Release (public) key
+    release_pubkey = _read_release_key()
+
+    # Node key
+    node_key = _read_node_key(options.cbdir, private=options.private)
+
+    if options.private:
+        key_title = 'Crossbar.io Node PRIVATE Key'
     else:
-        # Print keys
+        key_title = 'Crossbar.io Node PUBLIC Key'
 
-        # Release (public) key
-        release_pubkey = _read_release_key()
-
-        # Node key
-        node_key = _read_node_key(options.cbdir, private=options.private)
-
-        if options.private:
-            key_title = 'Crossbar.io Node PRIVATE Key'
-        else:
-            key_title = 'Crossbar.io Node PUBLIC Key'
-
-        log.info('')
-        log.info('{key_title}', key_title=hl('Crossbar Software Release Key', color='yellow', bold=True))
-        log.info('base64: {release_pubkey}', release_pubkey=release_pubkey[u'base64'])
-        log.info(release_pubkey[u'qrcode'].strip())
-        log.info('')
-        log.info('{key_title}', key_title=hl(key_title, color='yellow', bold=True))
-        log.info('hex: {node_key}', node_key=node_key[u'hex'])
-        log.info(node_key[u'qrcode'].strip())
-        log.info('')
+    log.info('')
+    log.info('{key_title}', key_title=hl('Crossbar Software Release Key', color='yellow', bold=True))
+    log.info('base64: {release_pubkey}', release_pubkey=release_pubkey[u'base64'])
+    log.info(release_pubkey[u'qrcode'].strip())
+    log.info('')
+    log.info('{key_title}', key_title=hl(key_title, color='yellow', bold=True))
+    log.info('hex: {node_key}', node_key=node_key[u'hex'])
+    log.info(node_key[u'qrcode'].strip())
+    log.info('')
 
 
 def _run_command_init(options, reactor, personality):
@@ -432,36 +539,35 @@ def _run_command_init(options, reactor, personality):
     """
     log = make_logger()
 
-    template = 'default'
-    templates = Templates()
-    assert(template in templates)
-
     if options.appdir is None:
         options.appdir = '.'
-    else:
-        if os.path.exists(options.appdir):
-            raise Exception("app directory '{}' already exists".format(options.appdir))
 
+    options.appdir = os.path.abspath(options.appdir)
+    cbdir = os.path.join(options.appdir, '.crossbar')
+
+    if os.path.exists(options.appdir):
+        log.warn("Application directory '{appdir}' already exists!", appdir=options.appdir)
+    else:
         try:
             os.mkdir(options.appdir)
         except Exception as e:
             raise Exception("could not create application directory '{}' ({})".format(options.appdir, e))
         else:
-            log.info("Crossbar.io application directory '{options.appdir}' created",
-                     options=options)
+            log.info("Crossbar.io application directory '{appdir}' created", appdir=options.appdir)
 
-    options.appdir = os.path.abspath(options.appdir)
+    log.info("Initializing application directory '{options.appdir}' ..", options=options)
 
-    log.info("Initializing node in directory '{options.appdir}'", options=options)
-    get_started_hint = templates.init(options.appdir, template)
+    get_started_hint = Templates.init(options.appdir, template='default')
 
-    log.info("Application template initialized")
+    _maybe_generate_key(cbdir)
+
+    log.info("Application directory initialized")
 
     if get_started_hint:
         log.info("\n{hint}\n", hint=get_started_hint)
     else:
         log.info("\nTo start your node, run 'crossbar start --cbdir {cbdir}'\n",
-                 cbdir=os.path.abspath(os.path.join(options.appdir, '.crossbar')))
+                 cbdir=os.path.abspath(cbdir))
 
 
 def _run_command_status(options, reactor, personality):
@@ -539,10 +645,7 @@ def _run_command_stop(options, reactor, personality):
                     print("Process {} terminated.".format(pid))
             else:
                 print("Process {} has excited gracefully.".format(pid))
-        if exit:
-            sys.exit(0)
-        else:
-            return pid_data
+        sys.exit(0)
     else:
         print("No Crossbar.io is currently running from node directory {}.".format(options.cbdir))
         sys.exit(getattr(os, 'EX_UNAVAILABLE', 1))
@@ -680,8 +783,13 @@ def _run_command_start(options, reactor, personality):
 
     # represents the running Crossbar.io node
     #
+    enable_vmprof = False
+    if _HAS_VMPROF:
+        enable_vmprof = options.vmprof
+
     node_options = personality.NodeOptions(debug_lifecycle=options.debug_lifecycle,
-                                           debug_programflow=options.debug_programflow)
+                                           debug_programflow=options.debug_programflow,
+                                           enable_vmprof=enable_vmprof)
 
     node = personality.Node(personality,
                             options.cbdir,
@@ -693,8 +801,8 @@ def _run_command_start(options, reactor, personality):
     for line in personality.BANNER.splitlines():
         log.info(hl(line, color='yellow', bold=True))
     log.info('')
-    log.info('Initializing {node_personality} node from node directory {cbdir} {node_class}',
-             node_personality=personality,
+    log.info('Initializing {node_class} as node [realm={realm}, cbdir={cbdir}]',
+             realm=hlid(node.realm),
              cbdir=hlid(options.cbdir),
              node_class=hltype(personality.Node))
 
@@ -705,7 +813,7 @@ def _run_command_start(options, reactor, personality):
     # check and load the node configuration
     #
     try:
-        config_source = node.load_config(options.config)
+        config_source, config_path = node.load_config(options.config)
     except InvalidConfigException as e:
         log.failure()
         log.error("Invalid node configuration")
@@ -714,7 +822,18 @@ def _run_command_start(options, reactor, personality):
     except:
         raise
     else:
-        log.info('Configuration source {config_source}', config_source=config_source)
+        config_source = node.CONFIG_SOURCE_TO_STR[config_source]
+        log.info('Node configuration loaded [config_source={config_source}, config_path={config_path}]',
+                 config_source=hl(config_source, bold=True, color='green'), config_path=hlid(config_path))
+
+    # if vmprof global profiling is enabled via command line option, this will carry
+    # the file where vmprof writes its profile data
+    if _HAS_VMPROF:
+        _vm_prof = {
+            # need to put this into a dict, since FDs are ints, and python closures can't
+            # write to this otherwise
+            'outfd': None
+        }
 
     # https://twistedmatrix.com/documents/current/api/twisted.internet.interfaces.IReactorCore.html
     # Each "system event" in Twisted, such as 'startup', 'shutdown', and 'persist', has 3 phases:
@@ -727,11 +846,18 @@ def _run_command_start(options, reactor, personality):
     def after_reactor_started():
         term_print('CROSSBAR:REACTOR_STARTED')
 
-    reactor.addSystemEventTrigger('before', 'startup', before_reactor_started)
-    reactor.addSystemEventTrigger('after', 'startup', after_reactor_started)
+        if _HAS_VMPROF and options.vmprof:
+            outfn = os.path.join(options.cbdir, '.vmprof-controller-{}.dat'.format(os.getpid()))
+            _vm_prof['outfd'] = os.open(outfn, os.O_RDWR | os.O_CREAT | os.O_TRUNC)
+            vmprof.enable(_vm_prof['outfd'], period=0.01)
+            term_print('CROSSBAR:VMPROF_ENABLED:{}'.format(outfn))
 
     def before_reactor_stopped():
         term_print('CROSSBAR:REACTOR_STOPPING')
+
+        if _HAS_VMPROF and options.vmprof and _vm_prof['outfd']:
+            vmprof.disable()
+            term_print('CROSSBAR:VMPROF_DISABLED')
 
     def after_reactor_stopped():
         # FIXME: we are indeed reaching this line, however,
@@ -745,6 +871,8 @@ def _run_command_start(options, reactor, personality):
         # https://unix.stackexchange.com/a/91716/52500
         term_print('CROSSBAR:REACTOR_STOPPED')
 
+    reactor.addSystemEventTrigger('before', 'startup', before_reactor_started)
+    reactor.addSystemEventTrigger('after', 'startup', after_reactor_started)
     reactor.addSystemEventTrigger('before', 'shutdown', before_reactor_stopped)
     reactor.addSystemEventTrigger('after', 'shutdown', after_reactor_stopped)
 
@@ -904,7 +1032,7 @@ def _run_command_keygen(options, reactor, personality):
         print("You should install 'autobahn[encryption]'")
         sys.exit(1)
 
-    priv, pub = KeyRing().generate_key()
+    priv, pub = KeyRing().generate_key_hex()
     print('  private: {}'.format(priv))
     print('   public: {}'.format(pub))
 
@@ -974,6 +1102,11 @@ def main(prog, args, reactor, personality):
                               default=None,
                               help='Automatically shutdown node after this many seconds.')
 
+    if _HAS_VMPROF:
+        parser_start.add_argument('--vmprof',
+                                  action='store_true',
+                                  help='Profile node controller and native worker using vmprof.')
+
     parser_start.set_defaults(func=_run_command_start)
 
     # "stop" command
@@ -1035,12 +1168,11 @@ def main(prog, args, reactor, personality):
 
     # "keygen" command
     #
-    if False:
-        parser_keygen = subparsers.add_parser(
-            'keygen',
-            help='Generate public/private keypairs for use with autobahn.wamp.cryptobox.KeyRing'
-        )
-        parser_keygen.set_defaults(func=_run_command_keygen)
+    parser_keygen = subparsers.add_parser(
+        'keygen',
+        help='Generate public/private keypairs for use with autobahn.wamp.cryptobox.KeyRing'
+    )
+    parser_keygen.set_defaults(func=_run_command_keygen)
 
     # "keys" command
     #
@@ -1051,10 +1183,6 @@ def main(prog, args, reactor, personality):
                              type=str,
                              default=None,
                              help="Crossbar.io node directory (overrides ${CROSSBAR_DIR} and the default ./.crossbar)")
-
-    parser_keys.add_argument('--generate',
-                             action='store_true',
-                             help='Generate a new node key pair if none exists, or loads/checks existing.')
 
     parser_keys.add_argument('--private',
                              action='store_true',

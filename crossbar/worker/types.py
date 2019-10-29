@@ -33,6 +33,7 @@ from __future__ import absolute_import
 from datetime import datetime
 
 from autobahn.util import utcstr
+from crossbar.worker.rlink import RLinkManager
 
 
 class RouterComponent(object):
@@ -43,12 +44,13 @@ class RouterComponent(object):
 
     def __init__(self, id, config, session):
         """
-        Ctor.
 
         :param id: The component ID within the router instance.
         :type id: str
+
         :param config: The component's configuration.
         :type config: dict
+
         :param session: The component application session.
         :type session: obj (instance of ApplicationSession)
         """
@@ -78,15 +80,20 @@ class RouterRealm(object):
     A realm running in a router worker.
     """
 
-    def __init__(self, controller, id, config, session=None):
+    def __init__(self, controller, id, config, router=None, session=None):
         """
-        Ctor.
 
-        :param id: The realm ID within the router.
+        :param controller: The controller this router is running under.
+        :type controller: object
+
+        :param id: The realm ID within the router worker, identifying the router.
         :type id: str
 
         :param config: The realm configuration.
         :type config: dict
+
+        :param router: The router (within the router worker) serving the realm.
+        :type router: :class:`crossbar.router.router.Router`
 
         :param session: The realm service session.
         :type session: :class:`crossbar.router.service.RouterServiceAgent`
@@ -94,17 +101,36 @@ class RouterRealm(object):
         self.controller = controller
         self.id = id
         self.config = config
+
+        # this is filled later (after construction) when the router has been started
+        self.router = router
+
+        # this is filled later (after construction) when the router service agent session has been started
         self.session = session
+
+        # router-realm links ("router-to-router connections")
+        self.rlink_manager = RLinkManager(self, controller)
+
         self.created = datetime.utcnow()
         self.roles = {}
 
     def marshal(self):
-        return {
+        marshalled = {
             u'id': self.id,
             u'config': self.config,
-            u'created': self.created,
-            u'roles': self.roles,
+            u'created': utcstr(self.created),
+            u'roles': [self.roles[role].marshal() for role in self.roles if self.roles],
+            u'has_router': self.router is not None,
+            u'has_service_session': self.session is not None,
         }
+
+        rlinks = []
+        for link_id in self.rlink_manager.keys():
+            rlinks.append(self.rlink_manager[link_id].marshal())
+
+        marshalled['rlinks'] = rlinks
+
+        return marshalled
 
 
 class RouterRealmRole(object):
@@ -115,12 +141,18 @@ class RouterRealmRole(object):
 
     def __init__(self, id, config):
         """
-        Ctor.
 
         :param id: The role ID within the realm.
         :type id: str
+
         :param config: The role configuration.
         :type config: dict
         """
         self.id = id
         self.config = config
+
+    def marshal(self):
+        return {
+            u'id': self.id,
+            u'config': self.config,
+        }

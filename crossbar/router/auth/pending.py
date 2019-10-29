@@ -143,19 +143,9 @@ class PendingAuth:
         if not self._authrole:
             return types.Deny(ApplicationError.NO_SUCH_ROLE, message=u'no authrole assigned')
 
-        # realm auto-activation: if realm is not started on router, maybe start it ..
-        if self._realm not in self._router_factory:
-            # FIXME: this can return a deferred!
-            self._router_factory.auto_start_realm(self._realm)
-
         # if realm is not started on router, bail out now!
         if self._realm not in self._router_factory:
             return types.Deny(ApplicationError.NO_SUCH_REALM, message=u'no realm "{}" exists on this router'.format(self._realm))
-
-        # role auto-activation: if role is not running on realm, maybe start it ..
-        if self._authrole and not self._router_factory[self._realm].has_role(self._authrole):
-            # FIXME: this can return a deferred!
-            self._router_factory.auto_add_role(self._realm, self._authrole)
 
         # if role is not running on realm, bail out now!
         if self._authrole and not self._router_factory[self._realm].has_role(self._authrole):
@@ -179,7 +169,10 @@ class PendingAuth:
     def _marshal_dynamic_authenticator_error(self, err):
         if isinstance(err.value, ApplicationError):
             # forward the inner error URI and message (or coerce the first args item to str)
-            return types.Deny(err.value.error, u'{}'.format(err.value.args[0]))
+            msg = None
+            if err.value.args:
+                msg = u'{}'.format(err.value.args[0])
+            return types.Deny(err.value.error, msg)
         else:
             # wrap the error
             error = ApplicationError.AUTHENTICATION_FAILED

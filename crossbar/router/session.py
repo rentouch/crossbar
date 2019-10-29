@@ -30,6 +30,7 @@
 
 from __future__ import absolute_import, division
 
+import os
 import binascii
 
 import txaio
@@ -42,7 +43,7 @@ from autobahn import wamp
 from autobahn.wamp import types
 from autobahn.wamp import message
 from autobahn.wamp.exception import ApplicationError
-from autobahn.wamp.protocol import BaseSession
+from autobahn.wamp.protocol import BaseSession, ApplicationSession
 from autobahn.wamp.exception import ProtocolError, SessionNotReady
 from autobahn.wamp.types import SessionDetails
 from autobahn.wamp.interfaces import ITransportHandler
@@ -50,6 +51,8 @@ from autobahn.wamp.interfaces import ITransportHandler
 from crossbar.common.twisted.endpoint import extract_peer_certificate
 from crossbar.router.auth import PendingAuthWampCra, PendingAuthTicket, PendingAuthScram
 from crossbar.router.auth import AUTHMETHODS, AUTHMETHOD_MAP
+from crossbar.router.router import Router, RouterFactory
+from crossbar.router import NotAttached
 
 from twisted.internet.defer import inlineCallbacks
 from twisted.python.failure import Failure
@@ -70,27 +73,31 @@ class RouterApplicationSession(object):
 
     log = make_logger()
 
-    def __init__(self, session, routerFactory, authid=None, authrole=None):
+    def __init__(self, session, router, authid=None, authrole=None, authextra=None):
         """
         Wrap an application session and add it to the given broker and dealer.
 
         :param session: Application session to wrap.
         :type session: An instance that implements :class:`autobahn.wamp.interfaces.ISession`
-        :param routerFactory: The router factory to associate this session with.
-        :type routerFactory: An instance that implements :class:`autobahn.wamp.interfaces.IRouterFactory`
+
+        :param router: The router this session is embedded within.
+        :type router: instance of :class:`crossbar.router.router.Router`
+
         :param authid: The fixed/trusted authentication ID under which the session will run.
         :type authid: str
+
         :param authrole: The fixed/trusted authentication role under which the session will run.
         :type authrole: str
         """
-
+        assert isinstance(session, ApplicationSession), 'session must be of class ApplicationSession, not {}'.format(session.__class__.__name__ if session else type(session))
+        assert isinstance(router, Router), 'router must be of class Router, not {}'.format(router.__class__.__name__ if router else type(router))
         assert(authid is None or isinstance(authid, str))
         assert(authrole is None or isinstance(authrole, str))
+        assert(authextra is None or type(authextra) == dict)
 
         # remember router we are wrapping the app session for
         #
-        self._routerFactory = routerFactory
-        self._router = None
+        self._router = router
 
         # remember wrapped app session
         #
@@ -100,6 +107,7 @@ class RouterApplicationSession(object):
         #
         self._trusted_authid = authid
         self._trusted_authrole = authrole
+        self._trusted_authextra = authextra
 
         # set fake transport on session ("pass-through transport")
         #
@@ -133,21 +141,35 @@ class RouterApplicationSession(object):
         """
         Implements :func:`autobahn.wamp.interfaces.ITransport.close`
         """
+        self.log.info('{klass}.close(session={session})',
+                      klass=self.__class__.__name__,
+                      session=self._session)
         if self._router:
-            # See also #578; this is to prevent the set() of observers
-            # shrinking while itering in broker.py:329 since the
-            # send() call happens synchronously because this class is
-            # acting as ITransport and the send() can result in an
-            # immediate disconnect which winds up right here...so we
-            # take at trip through the reactor loop.
-            from twisted.internet import reactor
+            if self._router.is_attached(self._session):
+                # See also #578; this is to prevent the set() of observers
+                # shrinking while itering in broker.py:329 since the
+                # send() call happens synchronously because this class is
+                # acting as ITransport and the send() can result in an
+                # immediate disconnect which winds up right here...so we
+                # take at trip through the reactor loop.
+                from twisted.internet import reactor
 
-            def detach(sess):
-                try:
-                    self._router.detach(sess)
-                except Exception:
-                    pass
-            reactor.callLater(0, detach, self._session)
+                def detach(sess):
+                    try:
+                        self._router.detach(sess)
+                    except NotAttached:
+                        self.log.warn('cannot detach session "{}": session not currently attached'.format(self._session._session_id))
+                    except Exception:
+                        self.log.failure()
+                reactor.callLater(0, detach, self._session)
+            else:
+                self.log.warn('{klass}.close: router embedded session "{session_id}" not attached to router realm "{realm}" (skipping detaching of session)',
+                              klass=self.__class__.__name__,
+                              session_id=self._session._session_id,
+                              realm=self._router._realm.id)
+        else:
+            self.log.warn('{klass}.close: router already none (skipping)',
+                          klass=self.__class__.__name__,)
 
     def abort(self):
         """
@@ -159,7 +181,6 @@ class RouterApplicationSession(object):
         Implements :func:`autobahn.wamp.interfaces.ITransport.send`
         """
         if isinstance(msg, message.Hello):
-            self._router = self._routerFactory.get(msg.realm)
 
             # fake session ID assignment (normally done in WAMP opening handshake)
             self._session._session_id = util.id()
@@ -171,7 +192,7 @@ class RouterApplicationSession(object):
             # FIXME: the following does blow up
             # self._session._authmethod = u'trusted'
             self._session._authprovider = None
-            self._session._authextra = None
+            self._session._authextra = self._trusted_authextra
 
             # add app session to router
             self._router.attach(self._session)
@@ -247,8 +268,10 @@ class RouterApplicationSession(object):
                 except Exception:
                     self._log_error(Failure(), "While firing onLeave")
 
-                if session._transport:
-                    session._transport.close()
+                # FIXME: I _think_ this is no longer needed / desirable, as it
+                # seems to lead to a duplicate call into close()
+                # if session._transport:
+                #     session._transport.close()
 
                 try:
                     yield session.fire('leave', session, details)
@@ -378,7 +401,11 @@ class RouterSession(BaseSession):
                 self._authrole = authrole
                 self._authmethod = authmethod
                 self._authprovider = authprovider
-                self._authextra = authextra
+                self._authextra = authextra or {}
+
+                self._authextra[u'x_cb_node_id'] = self._router_factory._node_id
+                self._authextra[u'x_cb_peer'] = str(self._transport.peer)
+                self._authextra[u'x_cb_pid'] = os.getpid()
 
                 roles = self._router.attach(self)
 
@@ -389,7 +416,7 @@ class RouterSession(BaseSession):
                                       authrole=authrole,
                                       authmethod=authmethod,
                                       authprovider=authprovider,
-                                      authextra=authextra,
+                                      authextra=self._authextra,
                                       custom=custom)
                 self._transport.send(msg)
 
@@ -412,6 +439,14 @@ class RouterSession(BaseSession):
 
                 def success(res):
                     msg = None
+                    # it is possible this session has disconnected
+                    # while onHello was taking place
+                    if self._transport is None:
+                        self.log.info(
+                            "Client session disconnected during authentication",
+                        )
+                        return
+
                     if isinstance(res, types.Accept):
                         custom = {
                             u'x_cb_node_id': self._router_factory._node_id
@@ -438,6 +473,14 @@ class RouterSession(BaseSession):
 
                 def success(res):
                     msg = None
+                    # it is possible this session has disconnected
+                    # while authentication was taking place
+                    if self._transport is None:
+                        self.log.info(
+                            "Client session disconnected during authentication",
+                        )
+                        return
+
                     if isinstance(res, types.Accept):
                         custom = {
                             u'x_cb_node_id': self._router_factory._node_id
@@ -844,7 +887,7 @@ ITransportHandler.register(RouterSession)
 
 class RouterSessionFactory(object):
     """
-    Factory creating the router side of (non-embedded) Crossbar.io WAMP sessions.
+    Factory creating the router side of Crossbar.io WAMP sessions.
     This is the session factory that will be given to router transports.
     """
 
@@ -861,32 +904,61 @@ class RouterSessionFactory(object):
         :param routerFactory: The router factory this session factory is working for.
         :type routerFactory: Instance of :class:`autobahn.wamp.router.RouterFactory`.
         """
+        assert isinstance(routerFactory, RouterFactory)
+
         self._routerFactory = routerFactory
         self._app_sessions = {}
 
-    def add(self, session, authid=None, authrole=None):
+    def add(self, session, router, authid=None, authrole=None, authextra=None):
         """
         Adds a WAMP application session to run directly in this router.
 
         :param: session: A WAMP application session.
-        :type session: A instance of a class that derives of :class:`autobahn.wamp.protocol.WampAppSession`
+        :type session: instance of :class:`autobahn.wamp.protocol.ApplicationSession`
         """
-        self._app_sessions[session] = RouterApplicationSession(session, self._routerFactory, authid, authrole)
+        assert isinstance(session, ApplicationSession)
+        assert isinstance(router, Router)
+        assert authid is None or type(authid) == str
+        assert authrole is None or type(authrole) == str
+        assert authextra is None or type(authextra) == dict
+
+        if session not in self._app_sessions:
+            router_session = RouterApplicationSession(session, router, authid, authrole, authextra)
+
+            self._app_sessions[session] = router_session
+
+        else:
+            self.log.warn('{klass}.add: session {session} already running embedded in router {router} (skipping addition of session)',
+                          klass=self.__class__.__name__,
+                          session=session,
+                          router=router)
+            router_session = self._app_sessions[session]
+        return router_session
 
     def remove(self, session):
         """
         Removes a WAMP application session running directly in this router.
+
+        :param: session: A WAMP application session currently embedded in a router created from this factory.
+        :type session: instance of :class:`autobahn.wamp.protocol.ApplicationSession`
         """
+        assert isinstance(session, ApplicationSession)
+
         if session in self._app_sessions:
             self._app_sessions[session]._session.disconnect()
+
             del self._app_sessions[session]
+
+        else:
+            self.log.warn('{klass}.remove: session {session} not running embedded in any router of this router factory (skipping removal of session)',
+                          klass=self.__class__.__name__,
+                          session=session)
 
     def __call__(self):
         """
         Creates a new WAMP router session.
 
-        :returns: -- An instance of the WAMP router session class as
-                     given by `self.session`.
+        :return: An instance of the WAMP router session class as given by `self.session`.
         """
         session = self.session(self._routerFactory)
         session.factory = self

@@ -9,6 +9,7 @@ all:
 	@echo "   install          Local install"
 	@echo "   publish          Clean build and publish to PyPI"
 	@echo "   docs             Build and test docs"
+	@echo "   prepareUbuntu    Prepare running tests on Ubuntu"
 	@echo ""
 
 clean:
@@ -59,15 +60,26 @@ docs_clean:
 	-rm -rf ./docs/_build
 
 
-# call this in a fresh virtualenv to update our frozen requirements.txt!
-freeze: clean
-	pip install -U virtualenv
+# freeze our dependencies
+freeze:
+	# do everything in a fresh environment
+	rm -rf vers
 	virtualenv vers
-	vers/bin/pip install -r requirements-min.txt
-	vers/bin/pip freeze --all | grep -v -e "wheel" -e "pip" -e "distribute" > requirements-pinned.txt
-	vers/bin/pip install hashin
-	rm requirements.txt
+
+	# install and freeze latest versions of minimum requirements
+	vers/bin/pip3 install -r requirements-min.txt
+	vers/bin/pip3 freeze --all | grep -v -e "wheel" -e "pip" -e "distribute" > requirements-pinned.txt
+
+	# persist OSS license list of our exact dependencies
+	vers/bin/pip3 install pip-licenses
+	vers/bin/pip-licenses --from-classifier -a -o name > crossbar/LICENSES-OSS
+	# vers/bin/pip-licenses --from-classifier -a -o name -r > docs/oss_licenses_table.rst
+
+	# hash all dependencies for repeatable builds
+	vers/bin/pip3 install hashin
+	-rm requirements.txt
 	cat requirements-pinned.txt | xargs vers/bin/hashin > requirements.txt
+
 
 wheel:
 	LMDB_FORCE_CFFI=1 SODIUM_INSTALL=bundled pip wheel --require-hashes --wheel-dir ./wheels -r requirements.txt
@@ -136,6 +148,9 @@ test_mqtt:
 #	trial crossbar.adapter.mqtt.test.test_wamp
 	trial crossbar.adapter.mqtt.test.test_wamp.MQTTAdapterTests.test_basic_publish
 
+test_testament:
+	trial crossbar.router.test.test_testament
+
 test_reactors:
 	clear
 	-crossbar version --loglevel=debug
@@ -150,7 +165,7 @@ full_test: clean flake8
 
 # This will run pep8, pyflakes and can skip lines that end with # noqa
 flake8:
-	flake8 --ignore=E402,F405,E501,E722,E741,E731,N801,N802,N803,N805,N806 crossbar
+	flake8 --ignore=E117,E402,F405,E501,E722,E741,E731,N801,N802,N803,N805,N806 crossbar
 
 flake8_stats:
 	flake8 --statistics --max-line-length=119 -qq crossbar
@@ -209,3 +224,8 @@ gource:
 	-threads 0 \
 	-bf 0 \
 	crossbar.mp4
+
+# Some prerequisites needed on ubuntu to run the tests.
+prepareUbuntu:
+	sudo apt install libsnappy-dev
+	sudo apt install python-tox

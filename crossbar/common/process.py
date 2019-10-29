@@ -59,9 +59,10 @@ else:
 from autobahn.util import utcnow, utcstr, rtime
 from autobahn.twisted.wamp import ApplicationSession
 from autobahn.wamp.exception import ApplicationError
-from autobahn.wamp.types import PublishOptions, RegisterOptions
+from autobahn.wamp.types import PublishOptions, RegisterOptions, ComponentConfig
 from autobahn import wamp
 
+import txaio
 from txaio import make_logger
 
 from twisted.cred import portal
@@ -72,6 +73,7 @@ from crossbar.common.processinfo import _HAS_PSUTIL
 if _HAS_PSUTIL:
     import psutil
     from crossbar.common.processinfo import ProcessInfo
+    from crossbar.common.monitor import ProcessMonitor
 
 if _HAS_MANHOLE:
     class ManholeService(object):
@@ -120,7 +122,27 @@ class NativeProcess(ApplicationSession):
     """
     log = make_logger()
 
+    WORKER_TYPE = u'native'
+
+    def onUserError(self, fail, msg):
+        """
+        Implements :func:`autobahn.wamp.interfaces.ISession.onUserError`
+        """
+        if isinstance(fail.value, ApplicationError):
+            self.log.debug('{klass}.onUserError(): "{msg}"',
+                           klass=self.__class__.__name__,
+                           msg=fail.value.error_message())
+        else:
+            self.log.error(
+                '{klass}.onUserError(): "{msg}"\n{traceback}',
+                klass=self.__class__.__name__,
+                msg=msg,
+                traceback=txaio.failure_format_traceback(fail),
+            )
+
     def __init__(self, config=None, reactor=None, personality=None):
+        assert config is None or isinstance(config, ComponentConfig)
+
         # Twisted reactor
         if not reactor:
             from twisted.internet import reactor
@@ -136,6 +158,11 @@ class NativeProcess(ApplicationSession):
 
         # base ctor
         super(ApplicationSession, self).__init__(config=config)
+
+        self._realm = config.realm if config else None
+        self._node_id = config.extra.node if config and config.extra else None
+        self._worker_id = config.extra.worker if config and config.extra else None
+        self._uri_prefix = u'crossbar.worker.{}'.format(self._worker_id)
 
     def onConnect(self, do_join=True):
         if not hasattr(self, 'cbdir'):
@@ -153,10 +180,12 @@ class NativeProcess(ApplicationSession):
 
         if _HAS_PSUTIL:
             self._pinfo = ProcessInfo()
+            self._pmonitor = ProcessMonitor(self.WORKER_TYPE, {})
             self._pinfo_monitor = None
             self._pinfo_monitor_seq = 0
         else:
             self._pinfo = None
+            self._pmonitor = None
             self._pinfo_monitor = None
             self._pinfo_monitor_seq = None
             self.log.info("Process utilities not available")
@@ -176,12 +205,13 @@ class NativeProcess(ApplicationSession):
             options=RegisterOptions(details_arg='details'),
         )
 
-        self.log.info("Registered {len_reg} procedures", len_reg=len(regs))
+        self.log.info('Registered {len_reg} management procedures on realm "{realm}"',
+                      len_reg=len(regs), realm=self.realm)
         for reg in regs:
             if isinstance(reg, Failure):
                 self.log.error("Failed to register: {f}", f=reg, log_failure=reg)
             else:
-                self.log.debug('  {proc}', proc=reg.procedure)
+                self.log.info('  {proc}', proc=reg.procedure)
         returnValue(regs)
 
     @wamp.register(None)
@@ -326,6 +356,16 @@ class NativeProcess(ApplicationSession):
 
         if self._pinfo:
             return self._pinfo.get_stats()
+        else:
+            emsg = "Could not retrieve process statistics: required packages not installed"
+            raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)
+
+    @wamp.register(None)
+    def get_process_monitor(self, details=None):
+        self.log.debug("{cls}.get_process_monitor", cls=self.__class__.__name__)
+
+        if self._pmonitor:
+            return self._pmonitor.poll()
         else:
             emsg = "Could not retrieve process statistics: required packages not installed"
             raise ApplicationError(u"crossbar.error.feature_unavailable", emsg)

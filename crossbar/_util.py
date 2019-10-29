@@ -30,6 +30,7 @@
 
 from __future__ import absolute_import, division
 
+import os
 import sys
 import inspect
 import json
@@ -54,18 +55,25 @@ def set_flags_from_args(_args):
 # FS path to controlling terminal
 _TERMINAL = None
 
-# *BSD and MacOSX
-if 'bsd' in sys.platform or sys.platform.startswith('darwin'):
-    _TERMINAL = '/dev/tty'
+# Linux, *BSD and MacOSX
+if sys.platform.startswith('linux') or 'bsd' in sys.platform or sys.platform.startswith('darwin'):
+    _TERMINAL = '/dev/tty' if os.path.exists('/dev/tty') else None
 # Windows
 elif sys.platform in ['win32']:
     pass
-# Linux
-elif sys.platform.startswith('linux'):
-    _TERMINAL = '/dev/tty'
 # Other OS
 else:
     pass
+
+# still, we might not be able to use TTY, so duck test it:
+if _TERMINAL:
+    try:
+        with open('/dev/tty', 'w') as f:
+            f.write('\n')
+            f.flush()
+    except:
+        # under systemd: OSError: [Errno 6] No such device or address: '/dev/tty'
+        _TERMINAL = None
 
 
 def class_name(obj):
@@ -110,7 +118,8 @@ def _qn(obj):
     return qn
 
 
-def hltype(obj, render=DEBUG_PROGRAMFLOW):
+# def hltype(obj, render=DEBUG_PROGRAMFLOW):
+def hltype(obj, render=True):
 
     if render:
         qn = _qn(obj).split('.')

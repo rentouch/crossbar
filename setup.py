@@ -63,11 +63,7 @@ with open(reqs) as f:
         if not line.startswith('#'):
             parts = line.strip().split(';')
             if len(parts) > 1:
-                parts[0] = parts[0].strip()
-                parts[1] = ':{}'.format(parts[1].strip())
-                if parts[1] not in extras_require:
-                    extras_require[parts[1]] = []
-                extras_require[parts[1]].append(parts[0])
+                print('Warning: requirements line "{}" ignored, as it uses env markers, which are not supported in setuptools'.format(line))
             else:
                 install_requires.append(parts)
 
@@ -104,7 +100,7 @@ setup(
     },
     packages=find_packages(),
     include_package_data=True,
-    data_files=[('.', ['COPYRIGHT', 'LICENSE', 'LICENSE-FOR-API'])],
+    data_files=[('.', ['crossbar/LEGAL', 'crossbar/LICENSE', 'crossbar/LICENSE-FOR-API', 'crossbar/LICENSES-OSS'])],
     zip_safe=False,
 
     # http://pypi.python.org/pypi?%3Aaction=list_classifiers
