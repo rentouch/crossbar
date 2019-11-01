@@ -153,6 +153,7 @@ class PendingAuth:
 
     def _init_dynamic_authenticator(self):
         self._authenticator = self._config['authenticator']
+        self._snitch = self._config.get('snitch', None)
 
         authenticator_realm = None
         if u'authenticator-realm' in self._config:

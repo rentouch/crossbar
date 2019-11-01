@@ -159,5 +159,17 @@ class PendingAuthWampCra(PendingAuth):
             # signature was valid: accept the client
             return self._accept()
         else:
+            # To prevent brute-force, we have to inform our authenticator
+            # about failed login attempts.
+            if self._snitch:
+                d = self._authenticator_session.call(self._snitch,
+                                                     self._authid)
+
+                def cb(*args, **kwargs):
+                    return types.Deny(message=u"WAMP-CRA signature is invalid")
+
+                d.addCallbacks(cb, cb)
+                return d
+
             # signature was invalid: deny the client
             return types.Deny(message=u"WAMP-CRA signature is invalid")
