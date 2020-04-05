@@ -28,8 +28,6 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import
-
 from datetime import datetime
 
 from autobahn.util import utcstr
@@ -65,12 +63,12 @@ class RouterComponent(object):
         """
         now = datetime.utcnow()
         return {
-            u'id': self.id,
+            'id': self.id,
             # 'started' is used by container-components; keeping it
             # for consistency in the public API
-            u'started': utcstr(self.created),
-            u'uptime': (now - self.created).total_seconds(),
-            u'config': self.config
+            'started': utcstr(self.created),
+            'uptime': (now - self.created).total_seconds(),
+            'config': self.config
         }
 
 
@@ -116,12 +114,12 @@ class RouterRealm(object):
 
     def marshal(self):
         marshalled = {
-            u'id': self.id,
-            u'config': self.config,
-            u'created': utcstr(self.created),
-            u'roles': [self.roles[role].marshal() for role in self.roles if self.roles],
-            u'has_router': self.router is not None,
-            u'has_service_session': self.session is not None,
+            'id': self.id,
+            'config': self.config,
+            'created': utcstr(self.created),
+            'roles': [self.roles[role].marshal() for role in self.roles if self.roles],
+            'has_router': self.router is not None,
+            'has_service_session': self.session is not None,
         }
 
         rlinks = []
@@ -153,6 +151,6 @@ class RouterRealmRole(object):
 
     def marshal(self):
         return {
-            u'id': self.id,
-            u'config': self.config,
+            'id': self.id,
+            'config': self.config,
         }

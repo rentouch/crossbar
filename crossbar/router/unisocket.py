@@ -28,8 +28,6 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import
-
 from urllib import parse as urlparse
 
 import txaio
@@ -114,11 +112,11 @@ class UniSocketServerProtocol(Protocol):
 
                 # the first component for the URI requested, eg for "/ws/foo/bar", it'll be "ws", and "/"
                 # will map to ""
-                request_uri_first_component = [x.strip() for x in request_uri.split(u'/') if x.strip() != u'']
+                request_uri_first_component = [x.strip() for x in request_uri.split('/') if x.strip() != '']
                 if len(request_uri_first_component) > 0:
                     request_uri_first_component = request_uri_first_component[0]
                 else:
-                    request_uri_first_component = u''
+                    request_uri_first_component = ''
 
                 self.log.debug('switching to HTTP on Request-URI {request_uri}, mapping part {request_uri_first_component}', request_uri=request_uri, request_uri_first_component=request_uri_first_component)
 

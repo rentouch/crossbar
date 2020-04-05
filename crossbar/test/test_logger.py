@@ -28,8 +28,6 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import, division, print_function
-
 import json
 
 from io import StringIO as NativeStringIO
@@ -238,8 +236,8 @@ class JSONObserverTests(TestCase):
 
         self.assertEqual(result[-1], record_separator)
         self.assertEqual(len(log_entry.keys()), 4)
-        self.assertEqual(log_entry["level"], u"info")
-        self.assertEqual(log_entry["text"], u"Hello")
+        self.assertEqual(log_entry["level"], "info")
+        self.assertEqual(log_entry["text"], "Hello")
 
     def test_failure(self):
         """
@@ -259,9 +257,9 @@ class JSONObserverTests(TestCase):
 
         self.assertEqual(result[-1], record_separator)
         self.assertEqual(len(log_entry.keys()), 4)
-        self.assertIn(u"ZeroDivisionError", log_entry["text"])
-        self.assertIn(u"Oh no !", log_entry["text"])
-        self.assertEqual(log_entry["level"], u"critical")
+        self.assertIn("ZeroDivisionError", log_entry["text"])
+        self.assertIn("Oh no !", log_entry["text"])
+        self.assertEqual(log_entry["level"], "critical")
 
     def test_not_json_serialisable(self):
         """
@@ -281,10 +279,10 @@ class JSONObserverTests(TestCase):
 
         self.assertEqual(result[-1], record_separator)
         self.assertEqual(len(log_entry.keys()), 5)
-        self.assertIn(u"ZeroDivisionError", log_entry["text"])
-        self.assertIn(u"Oh no", log_entry["text"])
-        self.assertIn(u"<function ", log_entry["obj"])
-        self.assertEqual(log_entry["level"], u"critical")
+        self.assertIn("ZeroDivisionError", log_entry["text"])
+        self.assertIn("Oh no", log_entry["text"])
+        self.assertIn("<function ", log_entry["obj"])
+        self.assertEqual(log_entry["level"], "critical")
 
     def test_repr_formatting(self):
         """
@@ -306,8 +304,8 @@ class JSONObserverTests(TestCase):
 
         self.assertEqual(result[-1], record_separator)
         self.assertEqual(len(log_entry.keys()), 5)
-        self.assertEqual(u"hi <BracketThing kwargs={{}}>", log_entry["text"])
-        self.assertEqual(log_entry["level"], u"info")
+        self.assertEqual("hi <BracketThing kwargs={{}}>", log_entry["text"])
+        self.assertEqual(log_entry["level"], "info")
 
     def test_raising_during_encoding(self):
         """
@@ -329,8 +327,8 @@ class JSONObserverTests(TestCase):
 
         self.assertEqual(result[-1], record_separator)
         self.assertEqual(len(log_entry.keys()), 3)
-        self.assertIn(u"MESSAGE LOST", log_entry["text"])
-        self.assertEqual(log_entry["level"], u"error")
+        self.assertIn("MESSAGE LOST", log_entry["text"])
+        self.assertEqual(log_entry["level"], "error")
 
     def test_unicode_logs(self):
         """
@@ -341,7 +339,7 @@ class JSONObserverTests(TestCase):
         log = make_logger(observer=observer)
 
         try:
-            raise Exception(u"\u2603")
+            raise Exception("\u2603")
         except:
             log.failure("Oh no")
 
@@ -350,8 +348,8 @@ class JSONObserverTests(TestCase):
 
         self.assertEqual(result[-1], record_separator)
         self.assertEqual(len(log_entry.keys()), 4)
-        self.assertIn(u"\u2603", log_entry["text"])
-        self.assertEqual(log_entry["level"], u"critical")
+        self.assertIn("\u2603", log_entry["text"])
+        self.assertEqual(log_entry["level"], "critical")
 
 
 class StdoutObserverTests(TestCase):
@@ -365,7 +363,7 @@ class StdoutObserverTests(TestCase):
         log.info("Hi!", log_system="foo")
 
         result = stream.getvalue()
-        self.assertIn(u"[foo]", result)
+        self.assertIn("[foo]", result)
 
     def test_output_standard(self):
         """
@@ -433,7 +431,7 @@ class StderrObserverTests(TestCase):
         log.error("Hi!", log_system="foo")
 
         result = stream.getvalue()
-        self.assertIn(u"[foo]", result)
+        self.assertIn("[foo]", result)
 
     def test_output_standard(self):
         """

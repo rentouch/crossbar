@@ -28,10 +28,11 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import, print_function
-
+import binascii
 import argparse
 import importlib
+
+import cbor2
 
 from twisted.internet.error import ReactorNotRunning
 
@@ -97,6 +98,12 @@ def get_argument_parser(parser=None):
                         type=str,
                         required=True,
                         help='Crossbar.io worker ID (required).')
+
+    parser.add_argument('-e',
+                        '--extra',
+                        type=str,
+                        required=False,
+                        help='Crossbar.io worker extra configuration from worker.options.extra (optional).')
 
     parser.add_argument('--title',
                         type=str,
@@ -366,7 +373,7 @@ def _run_command_exec_worker(options, reactor=None, personality=None):
         # create a WAMP-over-WebSocket transport server factory
         #
         from autobahn.twisted.websocket import WampWebSocketServerFactory
-        transport_factory = WampWebSocketServerFactory(make_session, u'ws://localhost')
+        transport_factory = WampWebSocketServerFactory(make_session, 'ws://localhost')
         transport_factory.protocol = WorkerServerProtocol
         transport_factory.setProtocolOptions(failByDrop=False)
 
@@ -403,5 +410,8 @@ if __name__ == '__main__':
 
     parser = get_argument_parser()
     args = parser.parse_args(_args)
+
+    if args.extra:
+        args.extra = cbor2.loads(binascii.a2b_hex(args.extra))
 
     _run_command_exec_worker(args)

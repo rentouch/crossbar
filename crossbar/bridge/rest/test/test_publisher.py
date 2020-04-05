@@ -28,8 +28,6 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import
-
 import json
 
 from twisted.internet.defer import inlineCallbacks, maybeDeferred
@@ -93,7 +91,7 @@ class PublisherTestCase(TestCase):
                 return maybeDeferred(self._publish, topic, *args, **kwargs)
 
             def _publish(self, topic, *args, **kwargs):
-                raise ApplicationError(u'wamp.error.not_authorized', foo="bar")
+                raise ApplicationError('wamp.error.not_authorized', foo="bar")
 
         session = RejectingPublisherSession()
         resource = PublisherResource({}, session)

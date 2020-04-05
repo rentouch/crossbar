@@ -28,8 +28,6 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import, division, print_function
-
 import warnings
 import attr
 
@@ -39,7 +37,7 @@ from bitstring import pack
 from ._utils import (read_prefixed_data, read_string, build_string,
                      build_header, ParseFailure, SerialisationFailure)
 
-unicode = type(u"")
+unicode = type("")
 
 
 @attr.s
@@ -645,7 +643,7 @@ class Connect(object):
         b = []
 
         # Protocol name (MQTT)
-        b.append(build_string(u"MQTT"))
+        b.append(build_string("MQTT"))
 
         # Protocol Level (4 == 3.1.1)
         b.append(pack('uint:8', 4).bytes)
@@ -685,7 +683,7 @@ class Connect(object):
 
         protocol = read_string(data)
 
-        if protocol != u"MQTT":
+        if protocol != "MQTT":
             print(protocol)
             raise ParseFailure(cls, "Bad protocol name")
 

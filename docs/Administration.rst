@@ -20,6 +20,7 @@ A Crossbar.io node runs from a :doc:`Node Configuration<Node-Configuration>` and
 
    -  :doc:`Router Realms <Router-Realms>`
    -  :doc:`Router Components <Router-Components>`
+   -  :doc:`Proxy Workers <Proxy-Workers>`
 
 -  :doc:`Container Configuration <Container-Configuration>`
 -  :doc:`Guest Configuration <Guest-Configuration>`
@@ -32,6 +33,10 @@ The router processes run :doc:`Router Transports <Router-Transports>`
 -  :doc:`WebSocket Transport <WebSocket-Transport>`
 -  :doc:`RawSocket Transport <RawSocket-Transport>`
 -  :doc:`MQTT Broker <MQTT-Broker>`
+
+Here is a complete example of a node configuration with router and container workers:
+
+-  :doc:`Node Configuration Example <Node-Configuration-Example>`
 
 Authentication and Authorization
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

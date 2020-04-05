@@ -28,8 +28,6 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import
-
 import random
 import txaio
 
@@ -69,6 +67,7 @@ class InvocationRequest(object):
         'forward_for',
         'canceled',
         'error_msg',
+        'timeout_call',
     )
 
     def __init__(self, id, registration, caller, call, callee, forward_for):
@@ -80,6 +79,7 @@ class InvocationRequest(object):
         self.forward_for = forward_for
         self.canceled = False
         self.error_msg = None
+        self.timeout_call = None  # if we have a timeout pending, this is it
 
 
 class RegistrationExtra(object):
@@ -109,6 +109,17 @@ class RegistrationCalleeExtra(object):
         return '{}(concurrency={}, concurrency_current={})'.format(self.__class__.__name__, self.concurrency, self.concurrency_current)
 
 
+def _can_cancel(session, side='callee'):
+    """
+    :returns: True if the session supports cancel
+    """
+    return (
+        side in session._session_roles
+        and session._session_roles[side]
+        and session._session_roles[side].call_canceling
+    )
+
+
 class Dealer(object):
     """
     Basic WAMP dealer.
@@ -127,6 +138,7 @@ class Dealer(object):
         """
         self._router = router
         self._reactor = reactor
+        self._cancel_timers = txaio.make_batched_timer(1)  # timeouts have to be integers anyway
         self._options = options or RouterOptions()
 
         # generator for WAMP request IDs
@@ -240,7 +252,7 @@ class Dealer(object):
                     message.Call.MESSAGE_TYPE,
                     invoke.call.request,
                     ApplicationError.CANCELED,
-                    [u"callee disconnected from in-flight request"],
+                    ["callee disconnected from in-flight request"],
                 )
                 # send this directly to the caller's session
                 # (it is possible the caller was disconnected and thus
@@ -259,7 +271,7 @@ class Dealer(object):
                 #
                 if self._router._realm and \
                    self._router._realm.session and \
-                   not registration.uri.startswith(u'wamp.'):
+                   not registration.uri.startswith('wamp.'):
 
                     def _publish(registration):
                         service_session = self._router._realm.session
@@ -271,7 +283,7 @@ class Dealer(object):
 
                         if was_registered:
                             service_session.publish(
-                                u'wamp.registration.on_unregister',
+                                'wamp.registration.on_unregister',
                                 session._session_id,
                                 registration.id,
                                 options=options,
@@ -279,7 +291,7 @@ class Dealer(object):
 
                         if was_last_callee:
                             service_session.publish(
-                                u'wamp.registration.on_delete',
+                                'wamp.registration.on_delete',
                                 session._session_id,
                                 registration.id,
                                 options=options,
@@ -290,7 +302,7 @@ class Dealer(object):
             del self._session_to_registrations[session]
 
         else:
-            raise NotAttached(u"session with ID {} not attached".format(session._session_id))
+            raise NotAttached("session with ID {} not attached".format(session._session_id))
 
     def processRegister(self, session, register):
         """
@@ -310,28 +322,28 @@ class Dealer(object):
             self._router._factory._worker._maybe_trace_rx_msg(session, register)
 
         if self._option_uri_strict:
-            if register.match == u"wildcard":
+            if register.match == "wildcard":
                 uri_is_valid = _URI_PAT_STRICT_EMPTY.match(register.procedure)
-            elif register.match == u"prefix":
+            elif register.match == "prefix":
                 uri_is_valid = _URI_PAT_STRICT_LAST_EMPTY.match(register.procedure)
-            elif register.match == u"exact":
+            elif register.match == "exact":
                 uri_is_valid = _URI_PAT_STRICT_NON_EMPTY.match(register.procedure)
             else:
                 # should not arrive here
                 raise Exception("logic error")
         else:
-            if register.match == u"wildcard":
+            if register.match == "wildcard":
                 uri_is_valid = _URI_PAT_LOOSE_EMPTY.match(register.procedure)
-            elif register.match == u"prefix":
+            elif register.match == "prefix":
                 uri_is_valid = _URI_PAT_LOOSE_LAST_EMPTY.match(register.procedure)
-            elif register.match == u"exact":
+            elif register.match == "exact":
                 uri_is_valid = _URI_PAT_LOOSE_NON_EMPTY.match(register.procedure)
             else:
                 # should not arrive here
                 raise Exception("logic error")
 
         if not uri_is_valid:
-            reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.INVALID_URI, [u"register for invalid procedure URI '{0}' (URI strict checking {1})".format(register.procedure, self._option_uri_strict)])
+            reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.INVALID_URI, ["register for invalid procedure URI '{0}' (URI strict checking {1})".format(register.procedure, self._option_uri_strict)])
             reply.correlation_id = register.correlation_id
             reply.correlation_uri = register.procedure
             reply.correlation_is_anchor = False
@@ -342,10 +354,10 @@ class Dealer(object):
         # disallow registration of procedures starting with "wamp." other than for
         # trusted sessions (that are sessions built into Crossbar.io routing core)
         #
-        if session._authrole is not None and session._authrole != u"trusted":
-            is_restricted = register.procedure.startswith(u"wamp.")
+        if session._authrole is not None and session._authrole != "trusted":
+            is_restricted = register.procedure.startswith("wamp.")
             if is_restricted:
-                reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.INVALID_URI, [u"register for restricted procedure URI '{0}')".format(register.procedure)])
+                reply = message.Error(message.Register.MESSAGE_TYPE, register.request, ApplicationError.INVALID_URI, ["register for restricted procedure URI '{0}')".format(register.procedure)])
                 reply.correlation_id = register.correlation_id
                 reply.correlation_uri = register.procedure
                 reply.correlation_is_anchor = False
@@ -355,20 +367,20 @@ class Dealer(object):
 
         # authorize REGISTER action
         #
-        d = self._router.authorize(session, register.procedure, u'register', options=register.marshal_options())
+        d = self._router.authorize(session, register.procedure, 'register', options=register.marshal_options())
 
         def on_authorize_success(authorization):
             # check the authorization before ANYTHING else, otherwise
             # we may leak information about already-registered URIs
             # etc.
-            if not authorization[u'allow']:
+            if not authorization['allow']:
                 # error reply since session is not authorized to register
                 #
                 reply = message.Error(
                     message.Register.MESSAGE_TYPE,
                     register.request,
                     ApplicationError.NOT_AUTHORIZED,
-                    [u"session is not authorized to register procedure '{0}'".format(register.procedure)],
+                    ["session is not authorized to register procedure '{0}'".format(register.procedure)],
                 )
 
             # get existing registration for procedure / matching strategy - if any
@@ -404,7 +416,7 @@ class Dealer(object):
                         message.Register.MESSAGE_TYPE,
                         register.request,
                         ApplicationError.PROCEDURE_ALREADY_EXISTS,
-                        [u"register for already registered procedure '{0}'".format(register.procedure)]
+                        ["register for already registered procedure '{0}'".format(register.procedure)]
                     )
                     reply.correlation_id = register.correlation_id
                     reply.correlation_uri = register.procedure
@@ -423,9 +435,9 @@ class Dealer(object):
                         register.request,
                         ApplicationError.PROCEDURE_EXISTS_INVOCATION_POLICY_CONFLICT,
                         [
-                            u"register for already registered procedure '{0}' "
-                            u"with conflicting invocation policy (has {1} and "
-                            u"{2} was requested)".format(
+                            "register for already registered procedure '{0}' "
+                            "with conflicting invocation policy (has {1} and "
+                            "{2} was requested)".format(
                                 register.procedure,
                                 registration.extra.invoke,
                                 register.invoke
@@ -441,7 +453,7 @@ class Dealer(object):
 
             # this check is a little redundant, because theoretically
             # we already returned (above) if this was False, but for safety...
-            if authorization[u'allow']:
+            if authorization['allow']:
                 registration = self._registration_map.get_observation(register.procedure, register.match)
                 if register.force_reregister and registration:
                     for obs in registration.observers:
@@ -449,7 +461,7 @@ class Dealer(object):
                         kicked = message.Unregistered(
                             0,
                             registration=registration.id,
-                            reason=u"wamp.error.unregistered",
+                            reason="wamp.error.unregistered",
                         )
                         kicked.correlation_id = register.correlation_id
                         kicked.correlation_uri = register.procedure
@@ -479,7 +491,7 @@ class Dealer(object):
                 #
                 if self._router._realm and \
                    self._router._realm.session and \
-                   not registration.uri.startswith(u'wamp.') and \
+                   not registration.uri.startswith('wamp.') and \
                    (is_first_callee or not was_already_registered):
 
                     reply.correlation_is_last = False
@@ -508,14 +520,14 @@ class Dealer(object):
 
                         if is_first_callee:
                             registration_details = {
-                                u'id': registration.id,
-                                u'created': registration.created,
-                                u'uri': registration.uri,
-                                u'match': registration.match,
-                                u'invoke': registration.extra.invoke,
+                                'id': registration.id,
+                                'created': registration.created,
+                                'uri': registration.uri,
+                                'match': registration.match,
+                                'invoke': registration.extra.invoke,
                             }
                             service_session.publish(
-                                u'wamp.registration.on_create',
+                                'wamp.registration.on_create',
                                 session._session_id,
                                 registration_details,
                                 options=options
@@ -526,7 +538,7 @@ class Dealer(object):
                                 options.correlation_is_last = True
 
                             service_session.publish(
-                                u'wamp.registration.on_register',
+                                'wamp.registration.on_register',
                                 session._session_id,
                                 registration.id,
                                 options=options
@@ -553,7 +565,7 @@ class Dealer(object):
                 message.Register.MESSAGE_TYPE,
                 register.request,
                 ApplicationError.AUTHORIZATION_FAILED,
-                [u"failed to authorize session for registering procedure '{0}': {1}".format(register.procedure, err.value)]
+                ["failed to authorize session for registering procedure '{0}': {1}".format(register.procedure, err.value)]
             )
             reply.correlation_id = register.correlation_id
             reply.correlation_uri = register.procedure
@@ -636,7 +648,7 @@ class Dealer(object):
         #
         if self._router._realm and \
            self._router._realm.session and \
-           not registration.uri.startswith(u'wamp.') and \
+           not registration.uri.startswith('wamp.') and \
            (was_registered or was_deleted):
 
             has_follow_up_messages = True
@@ -666,7 +678,7 @@ class Dealer(object):
 
                 if was_registered:
                     service_session.publish(
-                        u'wamp.registration.on_unregister',
+                        'wamp.registration.on_unregister',
                         session._session_id,
                         registration.id,
                         options=options
@@ -677,7 +689,7 @@ class Dealer(object):
                         options.correlation_is_last = True
 
                     service_session.publish(
-                        u'wamp.registration.on_delete',
+                        'wamp.registration.on_delete',
                         session._session_id,
                         registration.id,
                         options=options
@@ -727,7 +739,7 @@ class Dealer(object):
             uri_is_valid = _URI_PAT_LOOSE_NON_EMPTY.match(call.procedure)
 
         if not uri_is_valid:
-            reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.INVALID_URI, [u"call with invalid procedure URI '{0}' (URI strict checking {1})".format(call.procedure, self._option_uri_strict)])
+            reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.INVALID_URI, ["call with invalid procedure URI '{0}' (URI strict checking {1})".format(call.procedure, self._option_uri_strict)])
             reply.correlation_id = call.correlation_id
             reply.correlation_uri = call.procedure
             reply.correlation_is_anchor = False
@@ -737,18 +749,18 @@ class Dealer(object):
 
         # authorize CALL action
         #
-        d = self._router.authorize(session, call.procedure, u'call', options=call.marshal_options())
+        d = self._router.authorize(session, call.procedure, 'call', options=call.marshal_options())
 
         def on_authorize_success(authorization):
             # the call to authorize the action _itself_ succeeded. now go on depending on whether
             # the action was actually authorized or not ..
             #
-            if not authorization[u'allow']:
+            if not authorization['allow']:
                 reply = message.Error(
                     message.Call.MESSAGE_TYPE,
                     call.request,
                     ApplicationError.NOT_AUTHORIZED,
-                    [u"session is not authorized to call procedure '{0}'".format(call.procedure)]
+                    ["session is not authorized to call procedure '{0}'".format(call.procedure)]
                 )
                 reply.correlation_id = call.correlation_id
                 reply.correlation_uri = call.procedure
@@ -771,9 +783,9 @@ class Dealer(object):
                     #
                     if call.payload is None:
                         try:
-                            self._router.validate(u'call', call.procedure, call.args, call.kwargs)
+                            self._router.validate('call', call.procedure, call.args, call.kwargs)
                         except Exception as e:
-                            reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.INVALID_ARGUMENT, [u"call of procedure '{0}' with invalid application payload: {1}".format(call.procedure, e)])
+                            reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.INVALID_ARGUMENT, ["call of procedure '{0}' with invalid application payload: {1}".format(call.procedure, e)])
                             reply.correlation_id = call.correlation_id
                             reply.correlation_uri = call.procedure
                             reply.correlation_is_anchor = False
@@ -785,7 +797,7 @@ class Dealer(object):
                     #
                     self._call(session, call, registration, authorization)
                 else:
-                    reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.NO_SUCH_PROCEDURE, [u"no callee registered for procedure <{0}>".format(call.procedure)])
+                    reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.NO_SUCH_PROCEDURE, ["no callee registered for procedure <{0}>".format(call.procedure)])
                     reply.correlation_id = call.correlation_id
                     reply.correlation_uri = call.procedure
                     reply.correlation_is_anchor = False
@@ -803,7 +815,7 @@ class Dealer(object):
                 message.Call.MESSAGE_TYPE,
                 call.request,
                 ApplicationError.AUTHORIZATION_FAILED,
-                [u"failed to authorize session for calling procedure '{0}': {1}".format(call.procedure, err.value)]
+                ["failed to authorize session for calling procedure '{0}': {1}".format(call.procedure, err.value)]
             )
             reply.correlation_id = call.correlation_id
             reply.correlation_uri = call.procedure
@@ -836,7 +848,7 @@ class Dealer(object):
 
             else:
                 # should not arrive here
-                raise Exception(u"logic error")
+                raise Exception("logic error")
 
             # check maximum concurrency of the (single) endpoint
             callee_extra = registration.observers_extra.get(callee, None)
@@ -848,8 +860,8 @@ class Dealer(object):
                         reply = message.Error(
                             message.Call.MESSAGE_TYPE,
                             call.request,
-                            u'crossbar.error.max_concurrency_reached',
-                            [u'maximum concurrency {} of callee/endpoint reached (on non-shared/single registration)'.format(callee_extra.concurrency)]
+                            'crossbar.error.max_concurrency_reached',
+                            ['maximum concurrency {} of callee/endpoint reached (on non-shared/single registration)'.format(callee_extra.concurrency)]
                         )
                         reply.correlation_id = call.correlation_id
                         reply.correlation_uri = call.procedure
@@ -888,8 +900,8 @@ class Dealer(object):
                                 reply = message.Error(
                                     message.Call.MESSAGE_TYPE,
                                     call.request,
-                                    u'crossbar.error.max_concurrency_reached',
-                                    [u'maximum concurrency of all callee/endpoints reached (on round-robin registration)'.format(callee_extra.concurrency)]
+                                    'crossbar.error.max_concurrency_reached',
+                                    ['maximum concurrency of all callee/endpoints reached (on round-robin registration)'.format(callee_extra.concurrency)]
                                 )
                                 reply.correlation_id = call.correlation_id
                                 reply.correlation_uri = call.procedure
@@ -919,7 +931,7 @@ class Dealer(object):
 
         else:
             # should not arrive here
-            raise Exception(u"logic error")
+            raise Exception("logic error")
 
         # new ID for the invocation
         #
@@ -927,9 +939,9 @@ class Dealer(object):
 
         # caller disclosure
         #
-        if authorization.get(u'disclose', False):
+        if authorization.get('disclose', False):
             disclose = True
-        elif (call.procedure.startswith(u"wamp.") or call.procedure.startswith(u"crossbar.")):
+        elif (call.procedure.startswith("wamp.") or call.procedure.startswith("crossbar.")):
             disclose = True
         else:
             disclose = False
@@ -1003,11 +1015,11 @@ class Dealer(object):
         invocation.correlation_is_anchor = False
         invocation.correlation_is_last = False
 
-        self._add_invoke_request(invocation_request_id, registration, session, call, callee, forward_for)
+        self._add_invoke_request(invocation_request_id, registration, session, call, callee, forward_for, timeout=call.timeout)
         self._router.send(callee, invocation)
         return True
 
-    def _add_invoke_request(self, invocation_request_id, registration, session, call, callee, forward_for):
+    def _add_invoke_request(self, invocation_request_id, registration, session, call, callee, forward_for, timeout=None):
         """
         Internal helper.  Adds an InvocationRequest to both the
         _callee_to_invocations and _invocations maps.
@@ -1024,6 +1036,38 @@ class Dealer(object):
         invokes.append(invoke_request)
         self._caller_to_invocations[session] = invokes
 
+        # deal with possible timeouts
+        # NB: timeouts can only be integers (check spec, but this is
+        # what Autobahn code says) so we can just have a bucket-based
+        # thing (and probably should?) instead of "straight" callLater
+        if timeout:
+
+            def _cancel_both_sides():
+                """
+                The timeout was reacted; send an ERROR to the caller and INTERRUPT
+                to the callee
+                """
+                if _can_cancel(invoke_request.caller, 'caller'):
+                    self._router.send(
+                        invoke_request.caller,
+                        message.Error(
+                            message.Call.MESSAGE_TYPE,
+                            call.request,
+                            ApplicationError.CANCELED,
+                            [u"timeout reached"],
+                        ),
+                    )
+                if _can_cancel(invoke_request.callee, 'callee'):
+                    self._router.send(
+                        invoke_request.callee,
+                        message.Interrupt(
+                            invoke_request.id,
+                            message.Cancel.KILLNOWAIT,  # or KILL ?
+                        )
+                    )
+                self._remove_invoke_request(invoke_request)
+            invoke_request.timeout_call = self._cancel_timers.call_later(timeout, _cancel_both_sides)
+
         return invoke_request
 
     def _remove_invoke_request(self, invocation_request):
@@ -1031,6 +1075,10 @@ class Dealer(object):
         Internal helper. Removes an InvocationRequest from both the
         _callee_to_invocations and _invocations maps.
         """
+        if invocation_request.timeout_call:
+            invocation_request.timeout_call.cancel()
+            invocation_request.timeout_call = None
+
         invokes = self._callee_to_invocations[invocation_request.callee]
         invokes.remove(invocation_request)
         if not invokes:
@@ -1073,13 +1121,11 @@ class Dealer(object):
             if invocation_request.canceled:
                 return
 
-            def can_cancel(session):
-                return ('callee' in session._session_roles and session._session_roles['callee'] and session._session_roles['callee'].call_canceling)
-
             invocation_request.canceled = True
             # "skip" or "kill" or "killnowait" (see WAMP section.14.3.4)
             cancellation_mode = cancel.mode
-            if not can_cancel(invocation_request.callee):
+
+            if not _can_cancel(invocation_request.callee, 'callee'):
                 # callee can't deal with an "Interrupt"
                 cancellation_mode = message.Cancel.SKIP
 
@@ -1164,7 +1210,7 @@ class Dealer(object):
             # check to make sure this session is the one that is supposed to be yielding
             if invocation_request.callee is not session:
                 raise ProtocolError(
-                    u"Dealer.onYield(): YIELD received for non-owned request ID {0}".format(yield_.request))
+                    "Dealer.onYield(): YIELD received for non-owned request ID {0}".format(yield_.request))
 
             reply = None
 
@@ -1231,7 +1277,7 @@ class Dealer(object):
                         reply = message.Error(message.Call.MESSAGE_TYPE,
                                               invocation_request.call.request,
                                               ApplicationError.INVALID_ARGUMENT,
-                                              [u"call result from procedure '{0}' with invalid application payload: {1}".format(invocation_request.call.procedure, e)],
+                                              ["call result from procedure '{0}' with invalid application payload: {1}".format(invocation_request.call.procedure, e)],
                                               callee=callee,
                                               callee_authid=callee_authid,
                                               callee_authrole=callee_authrole,
@@ -1283,7 +1329,7 @@ class Dealer(object):
                                           invocation_request.call.request,
                                           ApplicationError.INVALID_ARGUMENT,
                                           [
-                                              u"call result from procedure '{0}' with invalid application payload: {1}".format(
+                                              "call result from procedure '{0}' with invalid application payload: {1}".format(
                                                   invocation_request.call.procedure, e)],
                                           callee=callee,
                                           callee_authid=callee_authid,
@@ -1402,7 +1448,7 @@ class Dealer(object):
                         reply = message.Error(message.Call.MESSAGE_TYPE,
                                               invocation_request.call.request,
                                               ApplicationError.INVALID_ARGUMENT,
-                                              [u"call error from procedure '{0}' with invalid application payload: {1}".format(invocation_request.call.procedure, e)],
+                                              ["call error from procedure '{0}' with invalid application payload: {1}".format(invocation_request.call.procedure, e)],
                                               callee=callee,
                                               callee_authid=callee_authid,
                                               callee_authrole=callee_authrole,

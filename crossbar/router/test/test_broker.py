@@ -28,8 +28,6 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import
-
 from twisted.trial import unittest
 
 import txaio
@@ -41,7 +39,7 @@ from autobahn.wamp import role
 from autobahn.twisted.wamp import ApplicationSession
 
 from crossbar.worker.types import RouterRealm
-from crossbar.router.router import RouterFactory
+from crossbar.router.router import RouterFactory, Router
 from crossbar.router.session import RouterSessionFactory, RouterSession
 from crossbar.router.broker import Broker
 from crossbar.router.role import RouterRoleStaticAuth
@@ -69,23 +67,23 @@ class TestBrokerPublish(unittest.TestCase):
         self.router_factory = RouterFactory(None, None)
 
         # start a realm
-        self.realm = RouterRealm(None, None, {u'name': u'realm1'})
+        self.realm = RouterRealm(None, None, {'name': 'realm1'})
         self.router_factory.start_realm(self.realm)
 
         # allow everything
-        self.router = self.router_factory.get(u'realm1')
+        self.router = self.router_factory.get('realm1')
         self.router.add_role(
             RouterRoleStaticAuth(
                 self.router,
-                u'test_role',
+                'test_role',
                 default_permissions={
-                    u'uri': u'com.example.',
-                    u'match': u'prefix',
-                    u'allow': {
-                        u'call': True,
-                        u'register': True,
-                        u'publish': True,
-                        u'subscribe': True,
+                    'uri': 'com.example.',
+                    'match': 'prefix',
+                    'allow': {
+                        'call': True,
+                        'register': True,
+                        'publish': True,
+                        'subscribe': True,
                     }
                 }
             )
@@ -109,7 +107,7 @@ class TestBrokerPublish(unittest.TestCase):
             def onJoin(self, details):
                 txaio.resolve(d, None)
 
-        session = TestSession(types.ComponentConfig(u'realm1'))
+        session = TestSession(types.ComponentConfig('realm1'))
 
         self.session_factory.add(session, self.router)
 
@@ -131,7 +129,7 @@ class TestBrokerPublish(unittest.TestCase):
             def onUserError(self, fail, msg):
                 errors.append((fail, msg))
 
-        session = TestSession(types.ComponentConfig(u'realm1'))
+        session = TestSession(types.ComponentConfig('realm1'))
         from crossbar.router.session import RouterApplicationSession
 
         # Note to self: original code was logging directly in
@@ -159,6 +157,7 @@ class TestBrokerPublish(unittest.TestCase):
         similar to above, but during _RouterSession's onMessage handling,
         where it calls self.onHello
         """
+
         # setup
         transport = mock.MagicMock()
         transport.get_channel_id = mock.MagicMock(return_value=b'deadbeef')
@@ -169,11 +168,9 @@ class TestBrokerPublish(unittest.TestCase):
         session = self.session_factory()  # __call__ on the _RouterSessionFactory
         session.onHello = boom
         session.onOpen(transport)
-        msg = message.Hello(u'realm1', dict(caller=role.RoleCallerFeatures()))
+        msg = message.Hello('realm1', dict(caller=role.RoleCallerFeatures()))
 
-        # XXX think: why isn't this using _RouterSession.log?
-        from crossbar.router.session import RouterSession
-        with mock.patch.object(RouterSession, 'log') as logger:
+        with mock.patch.object(session, 'log') as logger:
             # do the test; should call onHello which is now "boom", above
             session.onMessage(msg)
 
@@ -182,15 +179,16 @@ class TestBrokerPublish(unittest.TestCase):
             call = logger.method_calls[0]
             # for a MagicMock call-object, 0th thing is the method-name, 1st
             # thing is the arg-tuple, 2nd thing is the kwargs.
-            self.assertEqual(call[0], 'failure')
-            self.assertTrue('failure' in call[2])
-            self.assertEqual(call[2]['failure'].value, the_exception)
+            self.assertEqual(call[0], 'warn')
+            self.assertTrue('err' in call[2])
+            self.assertEqual(call[2]['err'].value, the_exception)
 
     def test_router_session_internal_error_onAuthenticate(self):
         """
         similar to above, but during _RouterSession's onMessage handling,
         where it calls self.onAuthenticate)
         """
+
         # setup
         transport = mock.MagicMock()
         transport.get_channel_id = mock.MagicMock(return_value=b'deadbeef')
@@ -201,7 +199,7 @@ class TestBrokerPublish(unittest.TestCase):
         session = self.session_factory()  # __call__ on the _RouterSessionFactory
         session.onAuthenticate = boom
         session.onOpen(transport)
-        msg = message.Authenticate(u'bogus signature')
+        msg = message.Authenticate('bogus signature')
 
         # do the test; should call onHello which is now "boom", above
         session.onMessage(msg)
@@ -214,44 +212,52 @@ class TestBrokerPublish(unittest.TestCase):
         """
         Reason should be propagated properly from Goodbye message
         """
-        raise unittest.SkipTest('FIXME: Adjust unit test mocks #1567')
 
         from crossbar.router.session import RouterApplicationSession
-        session = mock.Mock()
-        session._realm = u'realm'
-        router_factory = mock.Mock()
-        rap = RouterApplicationSession(session, router_factory)
+        session = ApplicationSession()
+        session.onLeave = mock.Mock()
+        session._realm = 'realm'
+        router = Router(
+            factory=mock.Mock(),
+            realm=RouterRealm(
+                controller=None,
+                id='realm',
+                config=dict(name='realm'),
+            )
+        )
+        rap = RouterApplicationSession(session, router)
 
-        rap.send(message.Hello(u'realm', {u'caller': role.RoleCallerFeatures()}))
-        session.reset_mock()
-        rap.send(message.Goodbye(u'wamp.reason.logout', u'some custom message'))
+        rap.send(message.Goodbye('wamp.reason.logout', 'some custom message'))
 
-        leaves = [call for call in session.mock_calls if call[0] == 'onLeave']
+        leaves = session.onLeave.mock_calls
         self.assertEqual(1, len(leaves))
         details = leaves[0][1][0]
-        self.assertEqual(u'wamp.reason.logout', details.reason)
-        self.assertEqual(u'some custom message', details.message)
+        self.assertEqual('wamp.reason.logout', details.reason)
+        self.assertEqual('some custom message', details.message)
 
     def test_router_session_goodbye_onLeave_error(self):
         """
         Reason should be propagated properly from Goodbye message
         """
-        raise unittest.SkipTest('FIXME: Adjust unit test mocks #1567')
-
         from crossbar.router.session import RouterApplicationSession
-        session = mock.Mock()
+        session = ApplicationSession()
         the_exception = RuntimeError("onLeave fails")
 
         def boom(*args, **kw):
             raise the_exception
         session.onLeave = mock.Mock(side_effect=boom)
-        session._realm = u'realm'
-        router_factory = mock.Mock()
-        rap = RouterApplicationSession(session, router_factory)
+        session._realm = 'realm'
+        router = Router(
+            factory=mock.Mock(),
+            realm=RouterRealm(
+                controller=None,
+                id='realm',
+                config=dict(name='realm'),
+            )
+        )
+        rap = RouterApplicationSession(session, router)
 
-        rap.send(message.Hello(u'realm', {u'caller': role.RoleCallerFeatures()}))
-        session.reset_mock()
-        rap.send(message.Goodbye(u'wamp.reason.logout', u'some custom message'))
+        rap.send(message.Goodbye('wamp.reason.logout', 'some custom message'))
 
         errors = self.flushLoggedErrors()
         self.assertEqual(1, len(errors))
@@ -261,10 +267,9 @@ class TestBrokerPublish(unittest.TestCase):
         """
         Reason should be propagated properly from Goodbye message
         """
-        raise unittest.SkipTest('FIXME: Adjust unit test mocks #1567')
 
         from crossbar.router.session import RouterApplicationSession
-        session = mock.Mock()
+        session = ApplicationSession()
         the_exception = RuntimeError("sad times at ridgemont high")
 
         def boom(*args, **kw):
@@ -272,13 +277,18 @@ class TestBrokerPublish(unittest.TestCase):
                 return defer.fail(the_exception)
             return defer.succeed(None)
         session.fire = mock.Mock(side_effect=boom)
-        session._realm = u'realm'
-        router_factory = mock.Mock()
-        rap = RouterApplicationSession(session, router_factory)
+        session._realm = 'realm'
+        router = Router(
+            factory=mock.Mock(),
+            realm=RouterRealm(
+                controller=None,
+                id='realm',
+                config=dict(name='realm'),
+            )
+        )
+        rap = RouterApplicationSession(session, router)
 
-        rap.send(message.Hello(u'realm', {u'caller': role.RoleCallerFeatures()}))
-        session.reset_mock()
-        rap.send(message.Goodbye(u'wamp.reason.logout', u'some custom message'))
+        rap.send(message.Goodbye('wamp.reason.logout', 'some custom message'))
 
         errors = self.flushLoggedErrors()
         self.assertEqual(1, len(errors))
@@ -288,7 +298,6 @@ class TestBrokerPublish(unittest.TestCase):
         """
         We see all 'lifecycle' notifications.
         """
-        raise unittest.SkipTest('FIXME: Adjust unit test mocks #1567')
 
         from crossbar.router.session import RouterApplicationSession
 
@@ -297,16 +306,22 @@ class TestBrokerPublish(unittest.TestCase):
             return defer.succeed(None)
 
         fired = []
-        session = mock.Mock()
-        session._realm = u'realm'
+        session = ApplicationSession()
+        session._realm = 'realm'
         session.fire = mock.Mock(side_effect=mock_fire)
-        router_factory = mock.Mock()
-        rap = RouterApplicationSession(session, router_factory)
+        router = Router(
+            factory=mock.Mock(),
+            realm=RouterRealm(
+                controller=None,
+                id='realm',
+                config=dict(name='realm'),
+            )
+        )
+        rap = RouterApplicationSession(session, router)
 
         # we never fake out the 'Welcome' message, so there will be no
         # 'ready' notification...
-        rap.send(message.Hello(u'realm', {u'caller': role.RoleCallerFeatures()}))
-        rap.send(message.Goodbye(u'wamp.reason.logout', u'some custom message'))
+        rap.send(message.Goodbye('wamp.reason.logout', 'some custom message'))
 
         self.assertTrue('connect' in fired)
         self.assertTrue('join' in fired)
@@ -324,7 +339,7 @@ class TestBrokerPublish(unittest.TestCase):
         class TestSession(ApplicationSession):
 
             def onJoin(self, details):
-                d2 = self.subscribe(lambda: None, u'com.example.topic1')
+                d2 = self.subscribe(lambda: None, 'com.example.topic1')
 
                 def ok(_):
                     txaio.resolve(d, None)
@@ -334,9 +349,9 @@ class TestBrokerPublish(unittest.TestCase):
 
                 txaio.add_callbacks(d2, ok, error)
 
-        session = TestSession(types.ComponentConfig(u'realm1'))
+        session = TestSession(types.ComponentConfig('realm1'))
 
-        self.session_factory.add(session, self.router, authrole=u'test_role')
+        self.session_factory.add(session, self.router, authrole='test_role')
 
         return d
 
@@ -354,7 +369,7 @@ class TestBrokerPublish(unittest.TestCase):
         session0 = TestSession()
         session1 = TestSession()
         router = mock.MagicMock()
-        router.new_correlation_id = lambda: u'fake correlation id'
+        router.new_correlation_id = lambda: 'fake correlation id'
         broker = Broker(router, reactor)
 
         # let's just "cheat" our way a little to the right state by
@@ -362,7 +377,7 @@ class TestBrokerPublish(unittest.TestCase):
         # faking out an entire Subscribe etc. flow
         # ...so we need _subscriptions_map to have at least one
         # subscription (our test one) for the topic we'll publish to
-        broker._subscription_map.add_observer(session0, u'test.topic')
+        broker._subscription_map.add_observer(session0, 'test.topic')
 
         # simulate the session state we want, which is that a
         # transport is connected (._transport != None) but there
@@ -381,7 +396,7 @@ class TestBrokerPublish(unittest.TestCase):
         # now we scan call "processPublish" such that we get to the
         # condition we're interested in (this "comes from" session1
         # beacuse by default publishes don't go to the same session)
-        pubmsg = message.Publish(123, u'test.topic')
+        pubmsg = message.Publish(123, 'test.topic')
         broker.processPublish(session1, pubmsg)
 
         # neither session should have sent anything on its transport
@@ -404,7 +419,7 @@ class TestBrokerPublish(unittest.TestCase):
         session2 = TestSession()
         router = mock.MagicMock()
         router.send = mock.Mock()
-        router.new_correlation_id = lambda: u'fake correlation id'
+        router.new_correlation_id = lambda: 'fake correlation id'
         router.is_traced = True
         broker = Broker(router, reactor)
 
@@ -413,8 +428,8 @@ class TestBrokerPublish(unittest.TestCase):
         # faking out an entire Subscribe etc. flow
         # ...so we need _subscriptions_map to have at least one
         # subscription (our test one) for the topic we'll publish to
-        broker._subscription_map.add_observer(session0, u'test.topic')
-        broker._subscription_map.add_observer(session1, u'test.topic')
+        broker._subscription_map.add_observer(session0, 'test.topic')
+        broker._subscription_map.add_observer(session1, 'test.topic')
 
         session0._session_id = 1000
         session0._transport = mock.MagicMock()
@@ -435,7 +450,7 @@ class TestBrokerPublish(unittest.TestCase):
         # now we scan call "processPublish" such that we get to the
         # condition we're interested in (this "comes from" session1
         # beacuse by default publishes don't go to the same session)
-        pubmsg = message.Publish(123, u'test.topic')
+        pubmsg = message.Publish(123, 'test.topic')
         broker.processPublish(session2, pubmsg)
 
         # extract all the event calls
@@ -471,7 +486,7 @@ class TestBrokerPublish(unittest.TestCase):
         sessions = [session1, session2, session3, session4, session0]
         router = mock.MagicMock()
         router.send = mock.Mock()
-        router.new_correlation_id = lambda: u'fake correlation id'
+        router.new_correlation_id = lambda: 'fake correlation id'
         router.is_traced = True
         clock = Clock()
         with replace_loop(clock):
@@ -488,7 +503,7 @@ class TestBrokerPublish(unittest.TestCase):
             # ...so we need _subscriptions_map to have at least one
             # subscription (our test one) for the topic we'll publish to
             for session in sessions:
-                broker._subscription_map.add_observer(session, u'test.topic')
+                broker._subscription_map.add_observer(session, 'test.topic')
 
             for i, sess in enumerate(sessions):
                 sess._session_id = 1000 + i
@@ -502,7 +517,7 @@ class TestBrokerPublish(unittest.TestCase):
             # now we scan call "processPublish" such that we get to the
             # condition we're interested in; should go to all sessions
             # except session0
-            pubmsg = message.Publish(123, u'test.topic')
+            pubmsg = message.Publish(123, 'test.topic')
             broker.processPublish(session0, pubmsg)
             clock.advance(1)
             clock.advance(1)
@@ -555,11 +570,11 @@ class TestBrokerPublish(unittest.TestCase):
                 router.attach(self._service_session)
 
                 router._broker._router._realm.session = self._service_session
-                subscription = message.Subscribe(self._service_session._session_id, u'com.example.test1')
+                subscription = message.Subscribe(self._service_session._session_id, 'com.example.test1')
                 router._broker.processSubscribe(self._service_session, subscription)
-                subscription = message.Subscribe(self._service_session._session_id, u'com.example.test2')
+                subscription = message.Subscribe(self._service_session._session_id, 'com.example.test2')
                 router._broker.processSubscribe(self._service_session, subscription)
-                subscription = message.Subscribe(self._service_session._session_id, u'com.example.test3')
+                subscription = message.Subscribe(self._service_session._session_id, 'com.example.test3')
                 router._broker.processSubscribe(self._service_session, subscription)
 
                 subscriptions = []
@@ -603,8 +618,8 @@ class TestBrokerPublish(unittest.TestCase):
 
                 reactor.callLater(0, all_done)
 
-        session = TestSession(types.ComponentConfig(u'realm1'))
-        self.session_factory.add(session, self.router, authrole=u'trusted')
+        session = TestSession(types.ComponentConfig('realm1'))
+        self.session_factory.add(session, self.router, authrole='trusted')
 
     def test_subscribe_detach(self):
         """
@@ -644,11 +659,11 @@ class TestBrokerPublish(unittest.TestCase):
                 router.attach(self._service_session)
 
                 router._broker._router._realm.session = self._service_session
-                subscription = message.Subscribe(self._service_session._session_id, u'com.example.test1')
+                subscription = message.Subscribe(self._service_session._session_id, 'com.example.test1')
                 router._broker.processSubscribe(self._service_session, subscription)
-                subscription = message.Subscribe(self._service_session._session_id, u'com.example.test2')
+                subscription = message.Subscribe(self._service_session._session_id, 'com.example.test2')
                 router._broker.processSubscribe(self._service_session, subscription)
-                subscription = message.Subscribe(self._service_session._session_id, u'com.example.test3')
+                subscription = message.Subscribe(self._service_session._session_id, 'com.example.test3')
                 router._broker.processSubscribe(self._service_session, subscription)
 
                 subscriptions = []
@@ -698,8 +713,8 @@ class TestBrokerPublish(unittest.TestCase):
 
                 reactor.callLater(0, all_done)
 
-        session = TestSession(types.ComponentConfig(u'realm1'))
-        self.session_factory.add(session, self.router, authrole=u'trusted')
+        session = TestSession(types.ComponentConfig('realm1'))
+        self.session_factory.add(session, self.router, authrole='trusted')
 
 
 class TestRouterSession(unittest.TestCase):
@@ -713,7 +728,7 @@ class TestRouterSession(unittest.TestCase):
         """
 
         router = mock.MagicMock()
-        router.new_correlation_id = lambda: u'fake correlation id'
+        router.new_correlation_id = lambda: 'fake correlation id'
 
         class TestSession(RouterSession):
             def __init__(self, *args, **kw):
@@ -728,7 +743,7 @@ class TestRouterSession(unittest.TestCase):
 
         router_factory = mock.MagicMock()
         session = TestSession(router_factory)
-        goodbye = message.Goodbye(u'wamp.close.normal', u'hi there')
+        goodbye = message.Goodbye('wamp.close.normal', 'hi there')
 
         self.assertFalse(session._goodbye_sent)
 
@@ -739,7 +754,7 @@ class TestRouterSession(unittest.TestCase):
         self.assertEqual(1, len(publishes))
         call = publishes[0]
         self.assertEqual(call[0], "publish")
-        self.assertEqual(call[1], (u"wamp.session.on_leave", 1234))
+        self.assertEqual(call[1], ("wamp.session.on_leave", 1234))
 
     def test_onleave_publish(self):
         """
@@ -748,7 +763,7 @@ class TestRouterSession(unittest.TestCase):
         """
 
         router = mock.MagicMock()
-        router.new_correlation_id = lambda: u'fake correlation id'
+        router.new_correlation_id = lambda: 'fake correlation id'
         utest = self
 
         class TestSession(RouterSession):
@@ -775,7 +790,7 @@ class TestRouterSession(unittest.TestCase):
 
         router_factory = mock.MagicMock()
         session = TestSession(router_factory)
-        goodbye = message.Goodbye(u'wamp.close.normal', u'hi there')
+        goodbye = message.Goodbye('wamp.close.normal', 'hi there')
 
         self.assertFalse(session._goodbye_sent)
 

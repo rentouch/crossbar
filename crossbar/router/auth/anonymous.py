@@ -28,8 +28,6 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import
-
 from autobahn import util
 from autobahn.wamp import types
 
@@ -48,30 +46,30 @@ class PendingAuthAnonymous(PendingAuth):
 
     log = make_logger()
 
-    AUTHMETHOD = u'anonymous'
+    AUTHMETHOD = 'anonymous'
 
     def hello(self, realm, details):
 
         # remember the realm the client requested to join (if any)
         self._realm = realm
 
-        self._authid = self._config.get(u'authid', util.generate_serial_number())
+        self._authid = self._config.get('authid', util.generate_serial_number())
 
-        self._session_details[u'authmethod'] = u'anonymous'
-        self._session_details[u'authextra'] = details.authextra
+        self._session_details['authmethod'] = 'anonymous'
+        self._session_details['authextra'] = details.authextra
 
         # WAMP-anonymous "static"
-        if self._config[u'type'] == u'static':
+        if self._config['type'] == 'static':
 
-            self._authprovider = u'static'
+            self._authprovider = 'static'
 
             # FIXME: if cookie tracking is enabled, set authid to cookie value
             # self._authid = self._transport._cbtid
 
             principal = {
-                u'authid': self._authid,
-                u'role': self._config.get(u'role', u'anonymous'),
-                u'extra': details.authextra
+                'authid': self._authid,
+                'role': self._config.get('role', 'anonymous'),
+                'extra': details.authextra
             }
 
             error = self._assign_principal(principal)
@@ -81,9 +79,9 @@ class PendingAuthAnonymous(PendingAuth):
             return self._accept()
 
         # WAMP-Ticket "dynamic"
-        elif self._config[u'type'] == u'dynamic':
+        elif self._config['type'] == 'dynamic':
 
-            self._authprovider = u'dynamic'
+            self._authprovider = 'dynamic'
 
             error = self._init_dynamic_authenticator()
             if error:
@@ -107,4 +105,27 @@ class PendingAuthAnonymous(PendingAuth):
 
         else:
             # should not arrive here, as config errors should be caught earlier
-            return types.Deny(message=u'invalid authentication configuration (authentication type "{}" is unknown)'.format(self._config['type']))
+            return types.Deny(message='invalid authentication configuration (authentication type "{}" is unknown)'.format(self._config['type']))
+
+
+class PendingAuthAnonymousProxy(PendingAuthAnonymous):
+    """
+    Pending Anonymous authentication with additions for proxy
+    """
+
+    log = make_logger()
+    AUTHMETHOD = 'anonymous-proxy'
+
+    def hello(self, realm, details):
+        # now, check anything we got in the authextra
+        extra = details.authextra or {}
+        if extra.get('cb_proxy_authid', None):
+            details.authid = extra['cb_proxy_authid']
+
+        if extra.get('cb_proxy_authrole', None):
+            details.authrole = extra['cb_proxy_authrole']
+
+        if extra.get('cb_proxy_authrealm', None):
+            realm = extra['cb_proxy_authrealm']
+
+        return super(PendingAuthAnonymousProxy, self).hello(realm, details)

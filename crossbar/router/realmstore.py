@@ -28,12 +28,9 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import, division
-
-from zlmdb import time_ns
 from collections import deque
 
-from txaio import make_logger
+from txaio import make_logger, time_ns
 
 __all__ = ('MemoryRealmStore',)
 
@@ -160,7 +157,7 @@ class MemoryEventStore(object):
     def attach_subscription_map(self, subscription_map):
         for sub in self._config.get('event-history', []):
             uri = sub['uri']
-            match = sub.get('match', u'exact')
+            match = sub.get('match', 'exact')
             observation, was_already_observed, was_first_observer = subscription_map.add_observer(self, uri=uri, match=match)
             subscription_id = observation.id
 

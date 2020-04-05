@@ -28,8 +28,6 @@
 #
 #####################################################################################
 
-from __future__ import absolute_import, division, print_function
-
 from twisted.trial.unittest import TestCase
 
 from crossbar import _compat as compat
@@ -51,4 +49,4 @@ class NativeStringTestCase(TestCase):
         A unicode argument should never be allowed.
         """
         with self.assertRaises(ValueError):
-            compat.native_string(u"bar")
+            compat.native_string("bar")

@@ -72,8 +72,8 @@ freeze:
 
 	# persist OSS license list of our exact dependencies
 	vers/bin/pip3 install pip-licenses
-	vers/bin/pip-licenses --from-classifier -a -o name > crossbar/LICENSES-OSS
-	# vers/bin/pip-licenses --from-classifier -a -o name -r > docs/oss_licenses_table.rst
+	vers/bin/pip-licenses --from=classifier -a -o name > crossbar/LICENSES-OSS
+	# vers/bin/pip-licenses --from=classifier -a -o name -r > docs/oss_licenses_table.rst
 
 	# hash all dependencies for repeatable builds
 	vers/bin/pip3 install hashin
@@ -148,8 +148,18 @@ test_mqtt:
 #	trial crossbar.adapter.mqtt.test.test_wamp
 	trial crossbar.adapter.mqtt.test.test_wamp.MQTTAdapterTests.test_basic_publish
 
+test_router:
+	trial crossbar.router.test.test_broker
+	#trial crossbar.router.test.test_router
+
 test_testament:
 	trial crossbar.router.test.test_testament
+
+test_auth_ticket:
+	trial crossbar.router.test.test_authorize.TestDynamicAuth.test_authextra_ticket
+
+test_auth:
+	trial crossbar.router.test.test_authorize
 
 test_reactors:
 	clear
