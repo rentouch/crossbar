@@ -37,9 +37,13 @@ from nacl.exceptions import BadSignatureError
 
 from autobahn import util
 from autobahn.wamp import types
+from autobahn.wamp.exception import ApplicationError
 
-from txaio import make_logger
+from twisted.internet.defer import Deferred
 
+import txaio
+
+from crossbar._util import hltype, hlid
 from crossbar.router.auth.pending import PendingAuth
 
 __all__ = (
@@ -53,7 +57,7 @@ class PendingAuthCryptosign(PendingAuth):
     Pending Cryptosign authentication.
     """
 
-    log = make_logger()
+    log = txaio.make_logger()
 
     AUTHMETHOD = 'cryptosign'
 
@@ -92,11 +96,16 @@ class PendingAuthCryptosign(PendingAuth):
             self._expected_signed_message = self._challenge
 
         extra = {
-            'challenge': binascii.b2a_hex(self._challenge).decode('ascii')
+            'challenge': binascii.b2a_hex(self._challenge).decode('ascii'),
+            'channel_binding': channel_binding,
         }
         return extra
 
-    def hello(self, realm, details):
+    def hello(self, realm: str, details: types.HelloDetails):
+        self.log.debug('{func}::hello(realm="{realm}", details.authid="{authid}", details.authrole="{authrole}")',
+                       func=hltype(self.hello), realm=hlid(realm), authid=hlid(details.authid),
+                       authrole=hlid(details.authrole))
+
         # the channel binding requested by the client authenticating
         channel_binding = details.authextra.get('channel_binding', None) if details.authextra else None
         if channel_binding is not None and channel_binding not in ['tls-unique']:
@@ -167,32 +176,106 @@ class PendingAuthCryptosign(PendingAuth):
 
             self._authprovider = 'dynamic'
 
-            error = self._init_dynamic_authenticator()
-            if error:
-                return error
+            d = Deferred()
 
-            self._session_details['authmethod'] = self._authmethod  # from AUTHMETHOD, via base
-            self._session_details['authid'] = details.authid
-            self._session_details['authrole'] = details.authrole
-            self._session_details['authextra'] = details.authextra
+            d1 = txaio.as_future(self._init_dynamic_authenticator)
 
-            d = self._authenticator_session.call(self._authenticator, realm, details.authid, self._session_details)
+            def initialized(error=None):
+                if error:
+                    d.errback(error)
+                    return
 
-            def on_authenticate_ok(principal):
-                error = self._assign_principal(principal)
+                self._session_details['authmethod'] = self._authmethod  # from AUTHMETHOD, via base
+                self._session_details['authid'] = details.authid
+                self._session_details['authrole'] = details.authrole
+                self._session_details['authextra'] = details.authextra
+
+                self.log.debug('Calling dynamic authenticator [proc="{proc}", realm="{realm}", session={session}, authid="{authid}", authrole="{authrole}"]',
+                               proc=self._authenticator,
+                               realm=self._authenticator_session._realm,
+                               session=self._authenticator_session._session_id,
+                               authid=self._authenticator_session._authid,
+                               authrole=self._authenticator_session._authrole)
+
+                d2 = self._authenticator_session.call(self._authenticator, realm, details.authid, self._session_details)
+
+                def on_authenticate_ok(principal):
+                    self.log.debug('{klass}.hello(realm="{realm}", details={details}) -> on_authenticate_ok(principal={principal})',
+                                   klass=self.__class__.__name__, realm=realm, details=details, principal=principal)
+                    error = self._assign_principal(principal)
+                    if error:
+                        d.callback(error)
+                        return
+
+                    self._verify_key = VerifyKey(principal['pubkey'], encoder=nacl.encoding.HexEncoder)
+
+                    extra = self._compute_challenge(channel_binding)
+                    d.callback(types.Challenge(self._authmethod, extra))
+
+                def on_authenticate_error(err):
+                    self.log.debug('{klass}.hello(realm="{realm}", details={details}) -> on_authenticate_error(err={err})',
+                                   klass=self.__class__.__name__, realm=realm, details=details, err=err)
+                    try:
+                        d.callback(self._marshal_dynamic_authenticator_error(err))
+                    except:
+                        self.log.failure()
+                        d.callback(error)
+
+                d2.addCallbacks(on_authenticate_ok, on_authenticate_error)
+                return d2
+
+            def initialized_error(fail):
+                self.log.failure('Internal error (3): {log_failure.value}', failure=fail)
+                d.errback(fail)
+
+            d1.addCallbacks(initialized, initialized_error)
+
+            return d
+
+        elif self._config['type'] == 'function':
+            self._authprovider = 'function'
+
+            init_d = txaio.as_future(self._init_function_authenticator)
+
+            def init(error):
                 if error:
                     return error
 
-                self._verify_key = VerifyKey(principal['pubkey'], encoder=nacl.encoding.HexEncoder)
+                self._session_details['authmethod'] = self._authmethod  # from AUTHMETHOD, via base
+                self._session_details['authid'] = details.authid
+                self._session_details['authrole'] = details.authrole
+                self._session_details['authextra'] = details.authextra
 
-                extra = self._compute_challenge(channel_binding)
-                return types.Challenge(self._authmethod, extra)
+                auth_d = txaio.as_future(self._authenticator, realm, details.authid, self._session_details)
 
-            def on_authenticate_error(err):
-                return self._marshal_dynamic_authenticator_error(err)
+                def on_authenticate_ok(principal):
+                    self.log.info('{klass}.hello(realm="{realm}", details={details}) -> on_authenticate_ok(principal={principal})',
+                                  klass=self.__class__.__name__, realm=realm, details=details, principal=principal)
+                    error = self._assign_principal(principal)
+                    if error:
+                        return error
 
-            d.addCallbacks(on_authenticate_ok, on_authenticate_error)
-            return d
+                    self._verify_key = VerifyKey(principal['pubkey'], encoder=nacl.encoding.HexEncoder)
+
+                    extra = self._compute_challenge(channel_binding)
+                    return types.Challenge(self._authmethod, extra)
+
+                def on_authenticate_error(err):
+                    self.log.info('{klass}.hello(realm="{realm}", details={details}) -> on_authenticate_error(err={err})',
+                                  klass=self.__class__.__name__, realm=realm, details=details, err=err)
+                    try:
+                        return self._marshal_dynamic_authenticator_error(err)
+                    except Exception as e:
+                        error = ApplicationError.AUTHENTICATION_FAILED
+                        message = 'marshalling of function-based authenticator error return failed: {}'.format(e)
+                        self.log.warn('{klass}.hello.on_authenticate_error() - {msg}', msg=message)
+                        return types.Deny(error, message)
+
+                auth_d.addCallbacks(on_authenticate_ok, on_authenticate_error)
+                return auth_d
+
+            init_d.addBoth(init)
+            return init_d
 
         else:
             # should not arrive here, as config errors should be caught earlier
@@ -241,19 +324,56 @@ class PendingAuthCryptosignProxy(PendingAuthCryptosign):
     Pending Cryptosign authentication with additions for proxy
     """
 
-    log = make_logger()
+    log = txaio.make_logger()
     AUTHMETHOD = 'cryptosign-proxy'
 
     def hello(self, realm, details):
-        # now, check anything we got in the authextra
-        extra = details.authextra or {}
-        if extra.get('cb_proxy_authid', None):
-            details.authid = extra['cb_proxy_authid']
+        self.log.debug('{klass}.hello(realm={realm}, details={details}) ...',
+                       klass=self.__class__.__name__, realm=realm, details=details)
+        if not details.authextra:
+            return types.Deny(message='missing required details.authextra')
+        for attr in ['proxy_authid', 'proxy_authrole', 'proxy_realm']:
+            if attr not in details.authextra:
+                return types.Deny(message='missing required attribute {} in details.authextra'.format(attr))
 
-        if extra.get('cb_proxy_authrole', None):
-            details.authrole = extra['cb_proxy_authrole']
+        if details.authrole is None:
+            details.authrole = details.authextra.get('proxy_authrole', None)
+        if details.authid is None:
+            details.authid = details.authextra.get('proxy_authid', None)
 
-        if extra.get('cb_proxy_authrealm', None):
-            realm = extra['cb_proxy_authrealm']
+        # with authentictors of type "*-proxy", the principal returned in authenticating the
+        # incoming backend connection is ignored ..
+        f = super(PendingAuthCryptosignProxy, self).hello(realm, details)
 
-        return super(PendingAuthCryptosignProxy, self).hello(realm, details)
+        def assign(res):
+            """
+            .. and the incoming backend connection from the proxy frontend is authenticated as the principal
+            the frontend proxy has _already_ authenticated the actual client (before even connecting and
+            authenticating to the backend here)
+            """
+            if isinstance(res, types.Deny):
+                return res
+
+            principal = {}
+            principal['realm'] = details.authextra['proxy_realm']
+            principal['authid'] = details.authextra['proxy_authid']
+            principal['role'] = details.authextra['proxy_authrole']
+            principal['extra'] = details.authextra.get('proxy_authextra', None)
+            self._assign_principal(principal)
+
+            self.log.debug(
+                '{klass}.hello(realm={realm}, details={details}) -> principal={principal}',
+                klass=self.__class__.__name__,
+                realm=realm,
+                details=details,
+                principal=principal,
+            )
+            return self._accept()
+
+        def error(f):
+            return types.Deny(
+                "Internal error: {}".format(f)
+            )
+
+        txaio.add_callbacks(f, assign, error)
+        return f

@@ -492,8 +492,14 @@ def check_transport_auth_cryptosign(config):
     if 'type' not in config:
         raise InvalidConfigException("missing mandatory attribute 'type' in WAMP-Cryptosign configuration")
 
-    if config['type'] not in ['static', 'dynamic']:
-        raise InvalidConfigException("invalid type '{}' in WAMP-Cryptosign configuration - must be one of 'static', 'dynamic'".format(config['type']))
+    valid_types = ['static', 'dynamic', 'function']
+    if config['type'] not in valid_types:
+        raise InvalidConfigException(
+            "invalid type '{}' in WAMP-Cryptosign configuration - must be one of {}".format(
+                config['type'],
+                ", ".join("'{}'".format(t) for t in valid_types),
+            )
+        )
 
     if config['type'] == 'static':
         if 'principals' not in config:
@@ -503,7 +509,7 @@ def check_transport_auth_cryptosign(config):
         for authid, principal in config['principals'].items():
             check_dict_args({
                 'authorized_keys': (True, [Sequence]),
-                'role': (True, [str]),
+                'role': (False, [str]),
                 'realm': (False, [str]),
             }, principal, "WAMP-Cryptosign - principal '{}' configuration".format(authid))
             for pubkey in principal['authorized_keys']:
@@ -514,6 +520,13 @@ def check_transport_auth_cryptosign(config):
         if 'authenticator' not in config:
             raise InvalidConfigException("missing mandatory attribute 'authenticator' in dynamic WAMP-Cryptosign configuration")
         check_or_raise_uri(config['authenticator'], "invalid authenticator URI '{}' in dynamic WAMP-Cryptosign configuration".format(config['authenticator']))
+
+    elif config['type'] == 'function':
+        if 'create' not in config:
+            raise InvalidConfigException(
+                "missing mandatory attribute 'create' in function WAMP-Cryptosign configuration"
+            )
+        # can also have optional 'config' item
     else:
         raise InvalidConfigException('logic error')
 
@@ -662,7 +675,10 @@ def check_transport_cookie(personality, cookie, ignore=[]):
         'name': (False, [str]),
         'length': (False, [int]),
         'max_age': (False, [int]),
-        'store': (False, [Mapping])
+        'store': (False, [Mapping]),
+        'secure': (False, [bool]),
+        'http_strict': (False, [bool]),
+        'same_site': (False, [str])
     }, cookie, "WebSocket cookie configuration")
 
     if 'name' in cookie:
@@ -698,6 +714,11 @@ def check_transport_cookie(personality, cookie, ignore=[]):
             pass
         else:
             raise InvalidConfigException('logic error')
+
+    if 'same_site' in cookie:
+        same_site = cookie['same_site']
+        if same_site not in ["Strict", "Lax", "None"]:
+            raise InvalidConfigException("invalid attribute value '{}' for attribute 'same_site' - must be one of 'Strict', 'Lax', 'None'".format(same_site))
 
 
 def check_endpoint_backlog(backlog):
@@ -3130,11 +3151,19 @@ def check_controller_options(personality, options, ignore=[]):
             raise InvalidConfigException("'title' in 'options' in controller configuration must be a string ({} encountered)".format(type(title)))
 
     if 'shutdown' in options:
-        if not isinstance(options['shutdown'], Sequence) or isinstance(options['shutdown'], str):
-            raise InvalidConfigException("invalid type {} for 'shutdown' in node controller options (must be a list)".format(type(options['shutdown'])))
-        for shutdown_mode in options['shutdown']:
-            if shutdown_mode not in NODE_SHUTDOWN_MODES:
-                raise InvalidConfigException("invalid value '{}' for shutdown mode in controller options (permissible values: {})".format(shutdown_mode, ', '.join("'{}'".format(x) for x in NODE_SHUTDOWN_MODES)))
+        if isinstance(options['shutdown'], str):
+            if options['shutdown'] not in NODE_SHUTDOWN_MODES:
+                raise InvalidConfigException(
+                    "invalid value '{}' for shutdown mode in controller options (permissible values: {})".format(
+                        options['shutdown'], ', '.join("'{}'".format(x) for x in NODE_SHUTDOWN_MODES)))
+        elif isinstance(options['shutdown'], Sequence):
+            for shutdown_mode in options['shutdown']:
+                if shutdown_mode not in NODE_SHUTDOWN_MODES:
+                    raise InvalidConfigException(
+                        "invalid value '{}' for shutdown mode in controller options (permissible values: {})".format(
+                            shutdown_mode, ', '.join("'{}'".format(x) for x in NODE_SHUTDOWN_MODES)))
+        else:
+            raise InvalidConfigException("invalid type {} for 'shutdown' in node controller options (must be a string or a list of strings)".format(type(options['shutdown'])))
 
     if 'enable_parallel_worker_start' in options:
         enable_parallel_worker_start = options['enable_parallel_worker_start']

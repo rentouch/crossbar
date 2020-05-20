@@ -30,12 +30,14 @@
 
 import txaio
 import uuid
+from typing import Optional
 
 from txaio import make_logger
 
 from autobahn.wamp import message
 from autobahn.wamp.exception import ProtocolError
 
+from crossbar._util import hltype, hlid, hlval
 from crossbar.router import RouterOptions
 from crossbar.router.broker import Broker
 from crossbar.router.dealer import Dealer
@@ -166,9 +168,7 @@ class Router(object):
         """
         Implements :func:`autobahn.wamp.interfaces.IRouter.attach`
         """
-        self.log.info('{klass}.attach(session={session})',
-                      klass=self.__class__.__name__,
-                      session=session._session_id if session else None)
+        self.log.debug('{func}(session={session})', func=hltype(self.attach), session=session)
 
         if session._session_id not in self._session_id_to_session:
             self._session_id_to_session[session._session_id] = session
@@ -180,10 +180,12 @@ class Router(object):
 
         self._attached += 1
 
-        self.log.info('{klass}.attach(session={session}): attached session {session} to router realm "{realm}"',
-                      klass=self.__class__.__name__,
-                      session=session._session_id if session else None,
-                      realm=self.realm)
+        self.log.info('attached session {session} to realm "{realm}" (authid="{authid}", authrole="{authrole}") {func}',
+                      func=hltype(self.attach),
+                      session=hlid(session._session_id) if session else '',
+                      authid=hlid(session._authid),
+                      authrole=hlid(session._authrole),
+                      realm=hlid(session._realm))
 
         return {'broker': self._broker._role_features, 'dealer': self._dealer._role_features}
 
@@ -235,9 +237,7 @@ class Router(object):
             self.log.trace('{details}', details=session_details)
 
     def detach(self, session=None):
-        self.log.info('{klass}.detach(session={session})',
-                      klass=self.__class__.__name__,
-                      session=session._session_id if session else None)
+        self.log.debug('{func}(session={session})', func=hltype(self.detach), session=session)
 
         detached_session_ids = []
         if session is None:
@@ -250,11 +250,13 @@ class Router(object):
             self._detach(session)
             detached_session_ids.append(session._session_id)
 
-        self.log.info('{klass}.detach(session={session}): detached sessions {detached_session_ids} from router realm "{realm}"',
-                      klass=self.__class__.__name__,
-                      session=session._session_id if session else None,
-                      detached_session_ids=detached_session_ids,
-                      realm=self.realm)
+        self.log.info('detached session {session} from realm "{realm}" (authid="{authid}", authrole="{authrole}", detached {detached_session_ids} sessions total) {func}',
+                      func=hltype(self.detach),
+                      session=hlid(session._session_id) if session else '',
+                      authid=hlid(session._authid),
+                      authrole=hlid(session._authrole),
+                      detached_session_ids=hlval(len(detached_session_ids)),
+                      realm=hlid(session._realm))
 
         return detached_session_ids
 
@@ -481,13 +483,16 @@ class RouterFactory(object):
     The router class this factory will create router instances from.
     """
 
-    def __init__(self, node_id, worker, options=None):
+    def __init__(self, node_id: str, worker_id: str, worker, options: Optional[RouterOptions] = None):
         """
 
+        :param node_id: Node (management) ID.
+        :param worker_id: (Router) worker (management) ID.
+        :param worker: Router worker.
         :param options: Default router options.
-        :type options: Instance of :class:`crossbar.router.RouterOptions`.
         """
         self._node_id = node_id
+        self._worker_id = worker_id
         self._worker = worker
         self._routers = {}
         self._options = options or RouterOptions(uri_check=RouterOptions.URI_CHECK_LOOSE)
@@ -509,20 +514,11 @@ class RouterFactory(object):
         """
         return self._routers.get(realm, None)
 
-    def has_realm(self, realm):
-        return realm in self._routers
-
-    def has_role(self, realm, role):
-        return self._routers[realm].has_role(role)
-
-    def get_service_session(self, realm):
-        return self._routers[realm]._realm.session
-
     def __getitem__(self, realm):
         return self._routers[realm]
 
     def __contains__(self, realm):
-        return self.has_realm(realm)
+        return realm in self._routers
 
     def on_last_detach(self, router):
         if router.realm in self._routers:
@@ -560,8 +556,7 @@ class RouterFactory(object):
         if 'store' in realm.config:
             psn = self._worker.personality
             store = psn.create_realm_store(psn, self, realm.config['store'])
-            self.log.info('Initialized realm store {rsk} for realm "{realm}"',
-                          rsk=store.__class__, realm=uri)
+            self.log.info('Initialized realm store {rsk} for realm "{realm}"', rsk=store.__class__, realm=uri)
 
         # now create a router for the realm
         #

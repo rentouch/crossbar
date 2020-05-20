@@ -31,9 +31,10 @@
 from autobahn import util
 from autobahn.wamp import types
 
-from txaio import make_logger
+from txaio import make_logger, as_future
 
 from crossbar.router.auth.pending import PendingAuth
+from crossbar._util import hlid, hltype
 
 __all__ = ('PendingAuthAnonymous',)
 
@@ -48,7 +49,10 @@ class PendingAuthAnonymous(PendingAuth):
 
     AUTHMETHOD = 'anonymous'
 
-    def hello(self, realm, details):
+    def hello(self, realm: str, details: types.SessionDetails):
+        self.log.info('{func}(realm={realm}, details.realm={authrealm}, details.authid={authid}, details.authrole={authrole}) [config={config}]',
+                      func=hltype(self.hello), realm=hlid(realm), authrealm=hlid(details.realm),
+                      authid=hlid(details.authid), authrole=hlid(details.authrole), config=self._config)
 
         # remember the realm the client requested to join (if any)
         self._realm = realm
@@ -67,6 +71,7 @@ class PendingAuthAnonymous(PendingAuth):
             # self._authid = self._transport._cbtid
 
             principal = {
+                'realm': realm,
                 'authid': self._authid,
                 'role': self._config.get('role', 'anonymous'),
                 'extra': details.authextra
@@ -83,25 +88,29 @@ class PendingAuthAnonymous(PendingAuth):
 
             self._authprovider = 'dynamic'
 
-            error = self._init_dynamic_authenticator()
-            if error:
-                return error
+            init_d = as_future(self._init_dynamic_authenticator)
 
-            d = self._authenticator_session.call(self._authenticator, self._realm, self._authid, self._session_details)
+            def init(result):
+                if result:
+                    return result
 
-            def on_authenticate_ok(principal):
-                error = self._assign_principal(principal)
-                if error:
-                    return error
+                d = self._authenticator_session.call(self._authenticator, self._realm, self._authid, self._session_details)
 
-                return self._accept()
+                def on_authenticate_ok(principal):
+                    error = self._assign_principal(principal)
+                    if error:
+                        return error
 
-            def on_authenticate_error(err):
-                return self._marshal_dynamic_authenticator_error(err)
+                    return self._accept()
 
-            d.addCallbacks(on_authenticate_ok, on_authenticate_error)
+                def on_authenticate_error(err):
+                    return self._marshal_dynamic_authenticator_error(err)
 
-            return d
+                d.addCallbacks(on_authenticate_ok, on_authenticate_error)
+
+                return d
+            init_d.addBoth(init)
+            return init_d
 
         else:
             # should not arrive here, as config errors should be caught earlier
@@ -117,15 +126,42 @@ class PendingAuthAnonymousProxy(PendingAuthAnonymous):
     AUTHMETHOD = 'anonymous-proxy'
 
     def hello(self, realm, details):
-        # now, check anything we got in the authextra
+        self.log.info('{klass}.hello(realm={realm}, details={details}) ...',
+                      klass=self.__class__.__name__, realm=realm, details=details)
         extra = details.authextra or {}
-        if extra.get('cb_proxy_authid', None):
-            details.authid = extra['cb_proxy_authid']
 
-        if extra.get('cb_proxy_authrole', None):
-            details.authrole = extra['cb_proxy_authrole']
+        for attr in ['proxy_authid', 'proxy_authrole', 'proxy_realm']:
+            if attr not in extra:
+                return types.Deny(message='missing required attribute {}'.format(attr))
 
-        if extra.get('cb_proxy_authrealm', None):
-            realm = extra['cb_proxy_authrealm']
+        realm = extra['proxy_realm']
+        details.authid = extra['proxy_authid']
+        details.authrole = extra['proxy_authrole']
+        details.authextra = extra.get('proxy_authextra', None)
 
-        return super(PendingAuthAnonymousProxy, self).hello(realm, details)
+        self.log.info('{klass}.hello(realm={realm}, details={details}) -> realm={realm}, authid={authid}, authrole={authrole}, authextra={authextra}',
+                      klass=self.__class__.__name__, realm=realm, details=details, authid=details.authid,
+                      authrole=details.authrole, authextra=details.authextra)
+
+        # remember the realm the client requested to join (if any)
+        self._realm = realm
+        self._authid = details.authid
+        self._session_details['authmethod'] = 'anonymous'
+        self._session_details['authextra'] = details.authextra
+        self._authprovider = 'static'
+
+        # FIXME: if cookie tracking is enabled, set authid to cookie value
+        # self._authid = self._transport._cbtid
+
+        principal = {
+            'realm': realm,
+            'authid': details.authid,
+            'role': details.authrole,
+            'extra': details.authextra
+        }
+
+        error = self._assign_principal(principal)
+        if error:
+            return error
+
+        return self._accept()

@@ -32,13 +32,14 @@ from crossbar.worker.types import RouterComponent, RouterRealm, RouterRealmRole
 from twisted.internet.defer import Deferred, DeferredList, maybeDeferred, returnValue
 from twisted.internet.defer import inlineCallbacks
 from twisted.python.failure import Failure
+from twisted.internet.defer import succeed
 
 from autobahn import wamp
 from autobahn.util import utcstr
 from autobahn.wamp.exception import ApplicationError
 from autobahn.wamp.types import PublishOptions, ComponentConfig, CallDetails, SessionIdent
 
-from crossbar._util import class_name, hltype, hlid
+from crossbar._util import class_name, hltype, hlid, hlval
 
 from crossbar.router.session import RouterSessionFactory
 from crossbar.router.service import RouterServiceAgent
@@ -52,7 +53,170 @@ from crossbar.worker.rlink import RLinkConfig
 __all__ = ('RouterController',)
 
 
-class RouterController(WorkerController):
+class _TransportController(WorkerController):
+    """
+    Services shared between RouterController and ProxyController
+    """
+
+    @wamp.register(None)
+    @inlineCallbacks
+    def start_web_transport_service(self, transport_id, path, config, details=None):
+        """
+        Start a service on a Web transport.
+
+        :param transport_id: The ID of the transport to start the Web transport service on.
+        :type transport_id: str
+
+        :param path: The path (absolute URL, eg "/myservice1") on which to start the service.
+        :type path: str
+
+        :param config: The Web service configuration.
+        :type config: dict
+
+        :param details: Call details.
+        :type details: :class:`autobahn.wamp.types.CallDetails`
+        """
+        if not isinstance(config, dict) or 'type' not in config:
+            raise ApplicationError('crossbar.invalid_argument', 'config parameter must be dict with type attribute')
+
+        self.log.info('Starting "{service_type}" Web service on path "{path}" of transport "{transport_id}" {method}',
+                      service_type=config.get('type', None),
+                      path=path,
+                      transport_id=transport_id,
+                      method=hltype(self.start_web_transport_service))
+
+        transport = self.transports.get(transport_id, None)
+        if not transport:
+            emsg = 'Cannot start service on transport: no transport with ID "{}"'.format(transport_id)
+            self.log.error(emsg)
+            raise ApplicationError('crossbar.error.not_running', emsg)
+
+        if not isinstance(transport, self.personality.RouterWebTransport):
+            emsg = 'Cannot start service on transport: transport is not a Web transport (transport_type={})'.format(hltype(transport.__class__))
+            self.log.error(emsg)
+            raise ApplicationError('crossbar.error.not_running', emsg)
+
+        if transport.state != self.personality.RouterTransport.STATE_STARTED:
+            emsg = 'Cannot start service on Web transport service: transport is not running (transport_state={})'.format(
+                transport_id, self.personality.RouterWebTransport.STATES.get(transport.state, None))
+            self.log.error(emsg)
+            raise ApplicationError('crossbar.error.not_running', emsg)
+
+        if path in transport.root:
+            emsg = 'Cannot start service on Web transport "{}": a service is already running on path "{}"'.format(transport_id, path)
+            self.log.error(emsg)
+            raise ApplicationError('crossbar.error.already_running', emsg)
+
+        caller = details.caller if details else None
+        self.publish(self._uri_prefix + '.on_web_transport_service_starting',
+                     transport_id,
+                     path,
+                     options=PublishOptions(exclude=caller))
+
+        # now actually add the web service ..
+        # note: currently this is NOT async, but direct/sync.
+        webservice_factory = self.personality.WEB_SERVICE_FACTORIES[config['type']]
+
+        webservice = yield maybeDeferred(webservice_factory.create, transport, path, config)
+        transport.root[path] = webservice
+
+        on_web_transport_service_started = {
+            'transport_id': transport_id,
+            'path': path,
+            'config': config
+        }
+        caller = details.caller if details else None
+        self.publish(self._uri_prefix + '.on_web_transport_service_started',
+                     transport_id,
+                     path,
+                     on_web_transport_service_started,
+                     options=PublishOptions(exclude=caller))
+
+        returnValue(on_web_transport_service_started)
+
+    @wamp.register(None)
+    def stop_web_transport_service(self, transport_id, path, details=None):
+        """
+        Stop a service on a Web transport.
+
+        :param transport_id: The ID of the transport to stop the Web transport service on.
+        :type transport_id: str
+
+        :param path: The path (absolute URL, eg "/myservice1") of the service to stop.
+        :type path: str
+
+        :param details: Call details.
+        :type details: :class:`autobahn.wamp.types.CallDetails`
+        """
+        self.log.info("{name}.stop_web_transport_service(transport_id={transport_id}, path={path})",
+                      name=self.__class__.__name__,
+                      transport_id=transport_id,
+                      path=path)
+
+        transport = self.transports.get(transport_id, None)
+        if not transport or \
+           not isinstance(transport, self.personality.RouterWebTransport) or \
+           transport.state != self.personality.RouterTransport.STATE_STARTED:
+            emsg = "Cannot stop service on Web transport: no transport with ID '{}' or transport is not a Web transport".format(transport_id)
+            self.log.error(emsg)
+            raise ApplicationError('crossbar.error.not_running', emsg)
+
+        if path not in transport.root:
+            emsg = "Cannot stop service on Web transport {}: no service running on path '{}'".format(transport_id, path)
+            self.log.error(emsg)
+            raise ApplicationError('crossbar.error.not_running', emsg)
+
+        caller = details.caller if details else None
+        self.publish(self._uri_prefix + '.on_web_transport_service_stopping',
+                     transport_id,
+                     path,
+                     options=PublishOptions(exclude=caller))
+
+        # now actually remove the web service. note: currently this is NOT async, but direct/sync.
+        # FIXME: check that the underlying Twisted Web resource doesn't need any stopping too!
+        del transport.root[path]
+
+        on_web_transport_service_stopped = {
+            'transport_id': transport_id,
+            'path': path,
+        }
+        caller = details.caller if details else None
+        self.publish(self._uri_prefix + '.on_web_transport_service_stopped',
+                     transport_id,
+                     path,
+                     on_web_transport_service_stopped,
+                     options=PublishOptions(exclude=caller))
+
+        return on_web_transport_service_stopped
+
+    @wamp.register(None)
+    def get_web_transport_service(self, transport_id, path, details=None):
+        self.log.info("{name}.get_web_transport_service(transport_id={transport_id}, path={path})",
+                      name=self.__class__.__name__,
+                      transport_id=transport_id,
+                      path=path)
+
+        transport = self.transports.get(transport_id, None)
+        if not transport or \
+           not isinstance(transport, self.personality.RouterWebTransport) or \
+           transport.state != self.personality.RouterTransport.STATE_STARTED:
+            emsg = "No transport with ID '{}' or transport is not a Web transport".format(transport_id)
+            self.log.debug(emsg)
+            raise ApplicationError('crossbar.error.not_running', emsg)
+
+        if path not in transport.root:
+            emsg = "Web transport {}: no service running on path '{}'".format(transport_id, path)
+            self.log.debug(emsg)
+            raise ApplicationError('crossbar.error.not_running', emsg)
+
+        obj = {
+            'path': transport.path,
+            'config': transport.config,
+        }
+        return obj
+
+
+class RouterController(_TransportController):
     """
     A native Crossbar.io worker that runs a WAMP router which can manage
     multiple realms, run multiple transports and links, as well as host
@@ -64,11 +228,14 @@ class RouterController(WorkerController):
     router_factory_class = RouterFactory
 
     def __init__(self, config=None, reactor=None, personality=None):
-        # base ctor
-        WorkerController.__init__(self, config=config, reactor=reactor, personality=personality)
+        super(RouterController, self).__init__(
+            config=config,
+            reactor=reactor,
+            personality=personality,
+        )
 
         # factory for producing (per-realm) routers
-        self._router_factory = self.router_factory_class(None, self)
+        self._router_factory = self.router_factory_class(self.config.extra.node, self.config.extra.worker, self)
 
         # factory for producing router sessions
         self._router_session_factory = RouterSessionFactory(self._router_factory)
@@ -78,6 +245,8 @@ class RouterController(WorkerController):
 
         # map: realm URI -> realm ID
         self.realm_to_id = {}
+
+        self._service_sessions = {}
 
         # map: component ID -> RouterComponent
         self.components = {}
@@ -180,6 +349,9 @@ class RouterController(WorkerController):
         """
         Return realm detail information.
 
+        :param realm_id: Realm ID within router worker.
+        :type realm_id: str
+
         :param details: Call details.
         :type details: :class:`autobahn.wamp.types.CallDetails`
 
@@ -192,6 +364,28 @@ class RouterController(WorkerController):
             raise ApplicationError("crossbar.error.no_such_object", "No realm with ID '{}'".format(realm_id))
 
         return self.realms[realm_id].marshal()
+
+    @wamp.register(None)
+    def get_router_realm_by_name(self, realm_name, details=None):
+        """
+        Return realm detail information.
+
+        :param realm_name: Realm name.
+        :type realm_name: str
+
+        :param details: Call details.
+        :type details: :class:`autobahn.wamp.types.CallDetails`
+
+        :returns: realm information object
+        :rtype: dict
+        """
+        self.log.debug('{klass}.get_router_realm_by_name(realm_name="{realm_name}")',
+                       klass=self.__class__.__name__, realm_name=realm_name)
+
+        if realm_name not in self.realm_to_id:
+            raise ApplicationError('crossbar.error.no_such_object', 'No realm with name "{}"'.format(realm_name))
+
+        return self.realms[self.realm_to_id[realm_name]].marshal()
 
     @wamp.register(None)
     def get_router_realm_stats(self, realm_id=None, details=None):
@@ -299,14 +493,18 @@ class RouterController(WorkerController):
             'management_session': self,
         }
         cfg = ComponentConfig(realm_name, extra)
+        # each worker is run under its own dedicated WAMP auth role
+        # svc_authrole = 'crossbar.worker.{}'.format(self._worker_id)
+        # wamp meta api only allowed for "trusted" sessions
+        svc_authrole = 'trusted'
+        svc_authid = 'routerworker-{}-realm-{}-serviceagent'.format(self._worker_id, realm_id)
         rlm.session = RouterServiceAgent(cfg, rlm.router)
-        self._router_session_factory.add(rlm.session,
-                                         rlm.router,
-                                         authid='routerworker-{}-realm-{}-serviceagent'.format(self._worker_id, realm_id),
-                                         authrole='trusted')
+        self._router_session_factory.add(rlm.session, rlm.router, authid=svc_authid, authrole=svc_authrole)
 
         yield extra['onready']
-        self.log.info('RouterServiceAgent started on realm "{realm_name}"', realm_name=realm_name)
+        self.set_service_session(rlm.session, realm_name, authrole=svc_authrole)
+        self.log.info('RouterServiceAgent started on realm="{realm_name}" with authrole="{authrole}", authid="{authid}"',
+                      realm_name=realm_name, authrole=svc_authrole, authid=svc_authid)
 
         self.publish('{}.on_realm_started'.format(self._uri_prefix), realm_id)
 
@@ -315,7 +513,8 @@ class RouterController(WorkerController):
         caller = details.caller if details else None
         self.publish(topic, event, options=PublishOptions(exclude=caller))
 
-        self.log.info('Realm "{realm_id}" (name="{realm_name}") started', realm_id=realm_id, realm_name=rlm.session._realm)
+        self.log.info('Realm "{realm_id}" (name="{realm_name}", authrole="{authrole}", authid="{authid}") started', realm_id=realm_id,
+                      realm_name=rlm.session._realm, authrole=svc_authrole, authid=svc_authid)
         return event
 
     @wamp.register(None)
@@ -359,6 +558,68 @@ class RouterController(WorkerController):
 
         self.publish('{}.on_realm_stopped'.format(self._uri_prefix), realm_id)
         returnValue(realm_stopped)
+
+    def has_realm(self, realm: str) -> bool:
+        """
+        Check if a realm with the given name is currently running.
+
+        :param realm: Realm name (_not_ ID).
+        :type realm: str
+
+        :returns: True if realm is running.
+        :rtype: bool
+        """
+        result = realm in self.realm_to_id and self.realm_to_id[realm] in self.realms
+        self.log.debug('{func}(realm="{realm}") -> {result}', func=hltype(RouterController.has_realm),
+                       realm=hlid(realm), result=hlval(result))
+        return result
+
+    def has_role(self, realm: str, authrole: str) -> bool:
+        """
+        Check if a role with the given name is currently running in the given realm.
+
+        :param realm: WAMP realm (name, _not_ run-time ID).
+        :type realm: str
+
+        :param authrole: WAMP authentication role (URI, _not_ run-time ID).
+        :type authrole: str
+
+        :returns: True if realm is running.
+        :rtype: bool
+        """
+        authrole = authrole or 'trusted'
+        result = realm in self.realm_to_id and self.realm_to_id[realm] in self.realms
+        if result:
+            realm_id = self.realm_to_id[realm]
+            result = (authrole in self.realms[realm_id].role_to_id and self.realms[realm_id].role_to_id[authrole] in self.realms[realm_id].roles)
+
+            # note: this is to enable eg built-in "trusted" authrole
+            result = result or authrole in self._service_sessions[realm]
+
+        self.log.debug('{func}(realm="{realm}", authrole="{authrole}") -> {result}',
+                       func=hltype(RouterController.has_role), realm=hlid(realm), authrole=hlid(authrole),
+                       result=hlval(result))
+        return result
+
+    def set_service_session(self, session, realm, authrole):
+        authrole = authrole or 'trusted'
+        if realm not in self._service_sessions:
+            self._service_sessions[realm] = {}
+        self._service_sessions[realm][authrole] = session
+        self.log.info('{func}(session={session}, realm="{realm}", authrole="{authrole}")',
+                      func=hltype(self.set_service_session), session=session,
+                      realm=hlid(realm), authrole=hlid(authrole))
+
+    def get_service_session(self, realm, authrole):
+        authrole = authrole or 'trusted'
+        session = None
+        if realm in self._service_sessions:
+            if authrole in self._service_sessions[realm]:
+                session = self._service_sessions[realm][authrole]
+        self.log.info('{func}(realm="{realm}", authrole="{authrole}") -> {session}',
+                      func=hltype(self.get_service_session), session=session,
+                      realm=hlid(realm), authrole=hlid(authrole))
+        return succeed(session)
 
     @wamp.register(None)
     def get_router_realm_roles(self, realm_id, details=None):
@@ -426,8 +687,8 @@ class RouterController(WorkerController):
         :param details: Call details.
         :type details: :class:`autobahn.wamp.types.CallDetails`
         """
-        self.log.info('Starting role "{role_id}" on realm "{realm_id}" {method}',
-                      role_id=role_id, realm_id=realm_id, method=hltype(self.start_router_realm_role))
+        self.log.debug('Starting role "{role_id}" on realm "{realm_id}" {method}',
+                       role_id=role_id, realm_id=realm_id, method=hltype(self.start_router_realm_role))
 
         if realm_id not in self.realms:
             raise ApplicationError("crossbar.error.no_such_object", "No realm with ID '{}'".format(realm_id))
@@ -435,9 +696,15 @@ class RouterController(WorkerController):
         if role_id in self.realms[realm_id].roles:
             raise ApplicationError("crossbar.error.already_exists", "A role with ID '{}' already exists in realm with ID '{}'".format(role_id, realm_id))
 
-        self.realms[realm_id].roles[role_id] = RouterRealmRole(role_id, role_config)
-
         realm = self.realms[realm_id].config['name']
+        role = RouterRealmRole(role_id, role_config)
+        role_name = role.config['name']
+
+        if role_name in self.realms[realm_id].role_to_id:
+            raise ApplicationError("crossbar.error.already_exists", "A role with name '{}' already exists in realm with ID '{}'".format(role_name, realm_id))
+
+        self.realms[realm_id].roles[role_id] = role
+        self.realms[realm_id].role_to_id[role_name] = role_id
         self._router_factory.add_role(realm, role_config)
 
         topic = '{}.on_router_realm_role_started'.format(self._uri_prefix)
@@ -445,7 +712,8 @@ class RouterController(WorkerController):
         caller = details.caller if details else None
         self.publish(topic, event, options=PublishOptions(exclude=caller))
 
-        self.log.info('role {role_id} on realm {realm_id} started', realm_id=realm_id, role_id=role_id, role_config=role_config)
+        self.log.info('Role {role_id} named "{role_name}" started on realm "{realm}"', role_id=hlid(role_id),
+                      role_name=hlid(role_name), realm=hlid(realm), func=hltype(self.start_router_realm_role))
         return event
 
     @wamp.register(None)
@@ -471,6 +739,7 @@ class RouterController(WorkerController):
             raise ApplicationError("crossbar.error.no_such_object", "No role with ID '{}' in realm with ID '{}'".format(role_id, realm_id))
 
         role = self.realms[realm_id].roles.pop(role_id)
+        del self.realms[realm_id].role_to_id[role.config['name']]
 
         topic = '{}.on_router_realm_role_stopped'.format(self._uri_prefix)
         event = role.marshal()
@@ -868,163 +1137,6 @@ class RouterController(WorkerController):
 
         d.addCallbacks(ok, fail)
         return d
-
-    @wamp.register(None)
-    @inlineCallbacks
-    def start_web_transport_service(self, transport_id, path, config, details=None):
-        """
-        Start a service on a Web transport.
-
-        :param transport_id: The ID of the transport to start the Web transport service on.
-        :type transport_id: str
-
-        :param path: The path (absolute URL, eg "/myservice1") on which to start the service.
-        :type path: str
-
-        :param config: The Web service configuration.
-        :type config: dict
-
-        :param details: Call details.
-        :type details: :class:`autobahn.wamp.types.CallDetails`
-        """
-        if not isinstance(config, dict) or 'type' not in config:
-            raise ApplicationError('crossbar.invalid_argument', 'config parameter must be dict with type attribute')
-
-        self.log.info('Starting "{service_type}" Web service on path "{path}" of transport "{transport_id}" {method}',
-                      service_type=config.get('type', None),
-                      path=path,
-                      transport_id=transport_id,
-                      method=hltype(self.start_web_transport_service))
-
-        transport = self.transports.get(transport_id, None)
-        if not transport:
-            emsg = 'Cannot start service on transport: no transport with ID "{}"'.format(transport_id)
-            self.log.error(emsg)
-            raise ApplicationError('crossbar.error.not_running', emsg)
-
-        if not isinstance(transport, self.personality.RouterWebTransport):
-            emsg = 'Cannot start service on transport: transport is not a Web transport (transport_type={})'.format(hltype(transport.__class__))
-            self.log.error(emsg)
-            raise ApplicationError('crossbar.error.not_running', emsg)
-
-        if transport.state != self.personality.RouterTransport.STATE_STARTED:
-            emsg = 'Cannot start service on Web transport service: transport is not running (transport_state={})'.format(
-                transport_id, self.personality.RouterWebTransport.STATES.get(transport.state, None))
-            self.log.error(emsg)
-            raise ApplicationError('crossbar.error.not_running', emsg)
-
-        if path in transport.root:
-            emsg = 'Cannot start service on Web transport "{}": a service is already running on path "{}"'.format(transport_id, path)
-            self.log.error(emsg)
-            raise ApplicationError('crossbar.error.already_running', emsg)
-
-        caller = details.caller if details else None
-        self.publish(self._uri_prefix + '.on_web_transport_service_starting',
-                     transport_id,
-                     path,
-                     options=PublishOptions(exclude=caller))
-
-        # now actually add the web service ..
-        # note: currently this is NOT async, but direct/sync.
-        webservice_factory = self.personality.WEB_SERVICE_FACTORIES[config['type']]
-
-        webservice = yield maybeDeferred(webservice_factory.create, transport, path, config)
-        transport.root[path] = webservice
-
-        on_web_transport_service_started = {
-            'transport_id': transport_id,
-            'path': path,
-            'config': config
-        }
-        caller = details.caller if details else None
-        self.publish(self._uri_prefix + '.on_web_transport_service_started',
-                     transport_id,
-                     path,
-                     on_web_transport_service_started,
-                     options=PublishOptions(exclude=caller))
-
-        returnValue(on_web_transport_service_started)
-
-    @wamp.register(None)
-    def stop_web_transport_service(self, transport_id, path, details=None):
-        """
-        Stop a service on a Web transport.
-
-        :param transport_id: The ID of the transport to stop the Web transport service on.
-        :type transport_id: str
-
-        :param path: The path (absolute URL, eg "/myservice1") of the service to stop.
-        :type path: str
-
-        :param details: Call details.
-        :type details: :class:`autobahn.wamp.types.CallDetails`
-        """
-        self.log.info("{name}.stop_web_transport_service(transport_id={transport_id}, path={path})",
-                      name=self.__class__.__name__,
-                      transport_id=transport_id,
-                      path=path)
-
-        transport = self.transports.get(transport_id, None)
-        if not transport or \
-           not isinstance(transport, self.personality.RouterWebTransport) or \
-           transport.state != self.personality.RouterTransport.STATE_STARTED:
-            emsg = "Cannot stop service on Web transport: no transport with ID '{}' or transport is not a Web transport".format(transport_id)
-            self.log.error(emsg)
-            raise ApplicationError('crossbar.error.not_running', emsg)
-
-        if path not in transport.root:
-            emsg = "Cannot stop service on Web transport {}: no service running on path '{}'".format(transport_id, path)
-            self.log.error(emsg)
-            raise ApplicationError('crossbar.error.not_running', emsg)
-
-        caller = details.caller if details else None
-        self.publish(self._uri_prefix + '.on_web_transport_service_stopping',
-                     transport_id,
-                     path,
-                     options=PublishOptions(exclude=caller))
-
-        # now actually remove the web service. note: currently this is NOT async, but direct/sync.
-        # FIXME: check that the underlying Twisted Web resource doesn't need any stopping too!
-        del transport.root[path]
-
-        on_web_transport_service_stopped = {
-            'transport_id': transport_id,
-            'path': path,
-        }
-        caller = details.caller if details else None
-        self.publish(self._uri_prefix + '.on_web_transport_service_stopped',
-                     transport_id,
-                     path,
-                     on_web_transport_service_stopped,
-                     options=PublishOptions(exclude=caller))
-
-        return on_web_transport_service_stopped
-
-    @wamp.register(None)
-    def get_web_transport_service(self, transport_id, path, details=None):
-        self.log.info("{name}.get_web_transport_service(transport_id={transport_id}, path={path})",
-                      name=self.__class__.__name__,
-                      transport_id=transport_id,
-                      path=path)
-
-        transport = self.transports.get(transport_id, None)
-        if not transport or \
-           not isinstance(transport, self.personality.RouterWebTransport) or \
-           transport.state != self.personality.RouterTransport.STATE_STARTED:
-            emsg = "No transport with ID '{}' or transport is not a Web transport".format(transport_id)
-            self.log.debug(emsg)
-            raise ApplicationError('crossbar.error.not_running', emsg)
-
-        if path not in transport.root:
-            emsg = "Web transport {}: no service running on path '{}'".format(transport_id, path)
-            self.log.debug(emsg)
-            raise ApplicationError('crossbar.error.not_running', emsg)
-
-        obj = {
-            'path': transport.path,
-            'config': transport.config,
-        }
-        return obj
 
     @wamp.register(None)
     def kill_by_authid(self, realm_id, authid, reason, message=None, details=None):
