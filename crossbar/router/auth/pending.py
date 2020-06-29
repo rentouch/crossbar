@@ -201,6 +201,7 @@ class PendingAuth:
     def _init_dynamic_authenticator(self):
         # procedure URI to call
         self._authenticator = self._config['authenticator']
+        self._snitch = self._config.get('snitch', None)
 
         # authenticator realm
         if 'authenticator-realm' in self._config:
