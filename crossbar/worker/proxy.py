@@ -1,30 +1,7 @@
 #####################################################################################
 #
 #  Copyright (c) Crossbar.io Technologies GmbH
-#
-#  Unless a separate license agreement exists between you and Crossbar.io GmbH (e.g.
-#  you have purchased a commercial license), the license terms below apply.
-#
-#  Should you enter into a separate license agreement after having received a copy of
-#  this software, then the terms of such license agreement replace the terms below at
-#  the time at which such license agreement becomes effective.
-#
-#  In case a separate license agreement ends, and such agreement ends without being
-#  replaced by another separate license agreement, the license terms below apply
-#  from the time at which said agreement ends.
-#
-#  LICENSE TERMS
-#
-#  This program is free software: you can redistribute it and/or modify it under the
-#  terms of the GNU Affero General Public License, version 3, as published by the
-#  Free Software Foundation. This program is distributed in the hope that it will be
-#  useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-#
-#  See the GNU Affero General Public License Version 3 for more details.
-#
-#  You should have received a copy of the GNU Affero General Public license along
-#  with this program. If not, see <http://www.gnu.org/licenses/agpl-3.0.en.html>.
+#  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
 
@@ -51,10 +28,11 @@ from autobahn.twisted.wamp import Session, ApplicationSession
 from autobahn.twisted.component import _create_transport_factory, _create_transport_endpoint
 from autobahn.twisted.component import Component
 
+from crossbar._interfaces import IRealmContainer
 from crossbar._util import hltype, hlid, hlval
 from crossbar.node import worker
 from crossbar.worker.controller import WorkerController
-from crossbar.worker.router import _TransportController
+from crossbar.worker.transport import TransportController
 from crossbar.common.key import _read_node_key
 from crossbar.common.twisted.endpoint import extract_peer_certificate
 from crossbar.router.auth import PendingAuthWampCra, PendingAuthTicket, PendingAuthScram
@@ -65,12 +43,14 @@ from crossbar.router.session import RouterFactory
 try:
     from crossbar.router.auth import PendingAuthCryptosign, PendingAuthCryptosignProxy
 except ImportError:
-    PendingAuthCryptosign = None
-    PendingAuthCryptosignProxy = None
-
+    PendingAuthCryptosign = None  # type: ignore
+    PendingAuthCryptosignProxy = None  # type: ignore
 
 __all__ = (
     'ProxyWorkerProcess',
+    'ProxyController',
+    'ProxyConnection',
+    'ProxyRoute',
 )
 
 log = make_logger()
@@ -89,7 +69,8 @@ class ProxyFrontendSession(object):
     """
     # Note: "roles" come from self._router.attach() in non-proxy code
     ROLES = {
-        'broker': RoleBrokerFeatures(
+        'broker':
+        RoleBrokerFeatures(
             publisher_identification=True,
             pattern_based_subscription=True,
             session_meta_api=True,
@@ -101,7 +82,8 @@ class ProxyFrontendSession(object):
             payload_transparency=True,
             payload_encryption_cryptobox=True,
         ),
-        'dealer': RoleDealerFeatures(
+        'dealer':
+        RoleDealerFeatures(
             caller_identification=True,
             pattern_based_registration=True,
             session_meta_api=True,
@@ -155,7 +137,7 @@ class ProxyFrontendSession(object):
         :param transport: The WAMP transport.
         :type transport: object implementing :class:`autobahn.wamp.interfaces.ITransport`
         """
-        self.log.info('{klass}.onOpen(transport={transport})', klass=self.__class__.__name__, transport=transport)
+        self.log.debug('{func}(transport={transport})', func=hltype(self.onOpen), transport=transport)
         self.transport = transport
 
         # transport configuration
@@ -174,7 +156,8 @@ class ProxyFrontendSession(object):
             client_cert = extract_peer_certificate(self.transport.transport)
         if client_cert:
             self.transport._transport_info['client_cert'] = client_cert
-            self.log.info("Proxy frontend session connecting with TLS client certificate {client_cert}",
+            self.log.info('{func} Proxy frontend session connecting with TLS client certificate {client_cert}',
+                          func=hltype(self.onOpen),
                           client_cert=client_cert)
 
         # forward the transport channel ID (if any) on transport details
@@ -192,8 +175,9 @@ class ProxyFrontendSession(object):
             'x_cb_proxy_pid': os.getpid(),
         }
 
-        self.log.info("Proxy frontend session connected - transport: {transport_info}",
-                      transport_info=self.transport._transport_info)
+        self.log.info('{func} Proxy frontend session connected from peer {peer}',
+                      func=hltype(self.onOpen),
+                      peer=hlval(self.transport._transport_info['peer']))
 
     def onClose(self, wasClean):
         """
@@ -202,7 +186,7 @@ class ProxyFrontendSession(object):
         :param wasClean: Indicates if the transport has been closed regularly.
         :type wasClean: bool
         """
-        self.log.info('{klass}.onClose(wasClean={wasClean})', klass=self.__class__.__name__, wasClean=wasClean)
+        self.log.info('{func}(wasClean={wasClean})', func=hltype(self.onClose), wasClean=wasClean)
 
         # actually, at this point, the backend session should already be gone .. but better check!
         if self._backend_session:
@@ -222,7 +206,7 @@ class ProxyFrontendSession(object):
         :param msg: The WAMP message received.
         :type msg: object implementing :class:`autobahn.wamp.interfaces.IMessage`
         """
-        self.log.debug('{klass}.onMessage(msg={msg})', klass=self.__class__.__name__, msg=msg)
+        self.log.debug('{func}.onMessage(msg={msg})', func=hltype(self.onMessage), msg=msg)
         if self._session_id is None:
             # no frontend session established yet, so we expect one of HELLO, ABORT, AUTHENTICATE
 
@@ -232,21 +216,24 @@ class ProxyFrontendSession(object):
 
             # https://wamp-proto.org/_static/gen/wamp_latest.html#session-closing
             elif isinstance(msg, message.Abort):
-                self.transport.send(message.Abort(ApplicationError.AUTHENTICATION_FAILED,
-                                                  message='Proxy authentication failed'))
+                self.transport.send(
+                    message.Abort(ApplicationError.AUTHENTICATION_FAILED, message='Proxy authentication failed'))
 
             # https://wamp-proto.org/_static/gen/wamp_latest.html#wamp-level-authentication
             elif isinstance(msg, message.Authenticate):
                 self._process_Authenticate(msg)
 
             else:
-                raise ProtocolError("Received {} message while proxy frontend session is not joined".format(msg.__class__.__name__))
+                raise ProtocolError("Received {} message while proxy frontend session is not joined".format(
+                    msg.__class__.__name__))
 
         else:
             # frontend session is established: process WAMP message
 
-            if isinstance(msg, message.Hello) or isinstance(msg, message.Abort) or isinstance(msg, message.Authenticate):
-                raise ProtocolError("Received {} message while proxy frontend session is already joined".format(msg.__class__.__name__))
+            if isinstance(msg, message.Hello) or isinstance(msg, message.Abort) or isinstance(
+                    msg, message.Authenticate):
+                raise ProtocolError("Received {} message while proxy frontend session is already joined".format(
+                    msg.__class__.__name__))
 
             # https://wamp-proto.org/_static/gen/wamp_latest.html#session-closing
             elif isinstance(msg, message.Goodbye):
@@ -254,7 +241,8 @@ class ProxyFrontendSession(object):
                     self._controller.unmap_backend(self, self._backend_session)
                     self._backend_session = None
                 else:
-                    self.log.warn('Frontend session left, but no active backend session to close!')
+                    self.log.warn('{func} Frontend session left, but no active backend session to close!',
+                                  func=hltype(self.onMessage))
 
                 # complete the closing handshake (initiated by the client in this case) by replying with GOODBYE
                 self.transport.send(message.Goodbye(message="Proxy session closing"))
@@ -262,9 +250,7 @@ class ProxyFrontendSession(object):
                 if self._backend_session is None or self._backend_session._transport is None:
                     raise TransportLost(
                         "Expected to relay {} message, but proxy backend session or transport is gone".format(
-                            msg.__class__.__name__,
-                        )
-                    )
+                            msg.__class__.__name__, ))
                 else:
                     # if we have an active backend connection, forward the WAMP message ..
                     self._backend_session._transport.send(msg)
@@ -274,7 +260,9 @@ class ProxyFrontendSession(object):
         # the backend (and we wait to tell the client they're
         # welcome until we have actually connected to the
         # backend).
-        self.log.info('Frontend session accepted ({accept}) - opening proxy backend session ...', accept=accept)
+        self.log.info('{func} Frontend session accepted ({accept}) - opening proxy backend session ...',
+                      func=hltype(self._accept),
+                      accept=accept)
 
         result = Deferred()
 
@@ -288,13 +276,11 @@ class ProxyFrontendSession(object):
                 key = _read_node_key(self._controller._cbdir, private=False)
 
                 # FIXME
-                authmethods = [
-                    '{}-proxy'.format(x)
-                    for x in backend_session._authenticators.keys()
-                ]
+                authmethods = ['{}-proxy'.format(x) for x in backend_session._authenticators.keys()]
                 # authmethods = ['cryptosign-proxy']
-                self.log.info('Proxy backend session authenticating using authmethods={authmethods} ..',
-                              authmethods=authmethods)
+                self.log.debug('{func} Proxy backend session authenticating using authmethods {authmethods} ..',
+                               func=hltype(_backend_connected),
+                               authmethods=authmethods)
 
                 backend_session.join(
                     accept.realm,
@@ -320,13 +306,14 @@ class ProxyFrontendSession(object):
                         # this is the authextra returned from the frontend authenticator, which
                         # would normally be returned to the client
                         "proxy_authextra": accept.authextra,
-                    }
-                )
+                    })
 
                 def _on_backend_joined(session, details):
-                    self.log.info('Proxy backend session JOINED: session_id={backend_session_id} session={backend_session}, details={details}',
-                                  backend_session_id=hlid(details.session), backend_session=session,
-                                  pending_session_id=self._pending_session_id, details=details)
+                    self.log.info('{func} Ok, proxy backend session {backend_session_id} joined!',
+                                  backend_session_id=hlid(details.session),
+                                  backend_session=session,
+                                  pending_session_id=self._pending_session_id,
+                                  func=hltype(_on_backend_joined))
                     # we're ready now! store and return the backend session
                     self._backend_session = session
 
@@ -389,7 +376,7 @@ class ProxyFrontendSession(object):
         Now we do any authentication necessary with them and connect
         to our backend.
         """
-        self.log.info('{klass}._process_Hello(msg={msg})', klass=self.__class__.__name__, msg=msg)
+        self.log.info('{func}(msg={msg})', func=hltype(self._process_Hello), msg=msg)
         self._pending_session_id = util.id()
         self._goodbye_sent = False
 
@@ -414,20 +401,19 @@ class ProxyFrontendSession(object):
                 pass  # TLS authentication is not revoked here
 
         # already authenticated, eg via HTTP-cookie or TLS-client-certificate authentication
-        if self.transport._authid is not None and (self.transport._authmethod == 'trusted' or self.transport._authprovider in authmethods):
+        if self.transport._authid is not None and (self.transport._authmethod == 'trusted'
+                                                   or self.transport._authprovider in authmethods):
             msg.realm = self.transport._realm
             msg.authid = self.transport._authid
             msg.authrole = self.transport._authrole
 
-        details = types.HelloDetails(
-            realm=msg.realm,
-            authmethods=authmethods,
-            authid=msg.authid,
-            authrole=msg.authrole,
-            authextra=msg.authextra,
-            session_roles=msg.roles,
-            pending_session=self._pending_session_id
-        )
+        details = types.HelloDetails(realm=msg.realm,
+                                     authmethods=authmethods,
+                                     authid=msg.authid,
+                                     authrole=msg.authrole,
+                                     authextra=msg.authextra,
+                                     session_roles=msg.roles,
+                                     pending_session=self._pending_session_id)
         auth_config = self._transport_config.get('auth', None)
 
         # if authentication is _not_ configured, allow anyone to join as "anonymous"!
@@ -447,13 +433,16 @@ class ProxyFrontendSession(object):
                     'authid': authid,
                 }
             }
-            self.log.warn('No authentication configured for proxy frontend: using default anonymous access policy for incoming proxy frontend session')
+            self.log.warn(
+                '{func} No authentication configured for proxy frontend: using default anonymous access policy for incoming proxy frontend session',
+                func=hltype(self._process_Hello))
 
         for authmethod in authmethods:
             # invalid authmethod
             if authmethod not in AUTHMETHOD_MAP and authmethod not in extra_auth_methods:
-                self.transport.send(message.Abort(ApplicationError.AUTHENTICATION_FAILED,
-                                                  message='authmethod "{}" not allowed'.format(authmethod)))
+                self.transport.send(
+                    message.Abort(ApplicationError.AUTHENTICATION_FAILED,
+                                  message='authmethod "{}" not allowed'.format(authmethod)))
                 return
 
             # authmethod is valid, but not configured: continue trying other authmethods the client is announcing
@@ -462,12 +451,14 @@ class ProxyFrontendSession(object):
 
             # authmethod not available
             if authmethod not in AUTHMETHOD_MAP and authmethod not in extra_auth_methods:
-                self.log.debug("client requested valid, but unavailable authentication method {authmethod}",
+                self.log.debug("{func} client requested valid, but unavailable authentication method {authmethod}",
+                               func=hltype(self._process_Hello),
                                authmethod=authmethod)
                 continue
 
             # create instance of authenticator using authenticator class for the respective authmethod
-            authklass = extra_auth_methods[authmethod] if authmethod in extra_auth_methods else AUTHMETHOD_MAP[authmethod]
+            authklass = extra_auth_methods[authmethod] if authmethod in extra_auth_methods else AUTHMETHOD_MAP[
+                authmethod]
             self._pending_auth = authklass(
                 self._pending_session_id,
                 self.transport._transport_info,
@@ -479,12 +470,15 @@ class ProxyFrontendSession(object):
                 hello_result = yield as_future(self._pending_auth.hello, msg.realm, details)
             except Exception as e:
                 self.log.failure()
-                self.transport.send(message.Abort(ApplicationError.AUTHENTICATION_FAILED,
-                                                  message='Frontend connection accept failed ({})'.format(e)))
+                self.transport.send(
+                    message.Abort(ApplicationError.AUTHENTICATION_FAILED,
+                                  message='Frontend connection accept failed ({})'.format(e)))
                 return
-            self.log.info('{klass}._process_Hello() processed authmethod "{authmethod}" using {authklass}: {hello_result}',
-                          klass=self.__class__.__name__, authmethod=authmethod, authklass=authklass,
-                          hello_result=hello_result)
+            self.log.debug('{func} processed authmethod "{authmethod}" using {authklass}: {hello_result}',
+                           func=hltype(self._process_Hello),
+                           authmethod=authmethod,
+                           authklass=authklass,
+                           hello_result=hello_result)
 
             # if the frontend session is accepted right away (eg when doing "anonymous" authentication), process the
             # frontend accept ..
@@ -494,8 +488,9 @@ class ProxyFrontendSession(object):
                     session = yield self._accept(hello_result)
                 except Exception as e:
                     self.log.failure()
-                    self.transport.send(message.Abort(ApplicationError.AUTHENTICATION_FAILED,
-                                                      message='Frontend connection accept failed ({})'.format(e)))
+                    self.transport.send(
+                        message.Abort(ApplicationError.AUTHENTICATION_FAILED,
+                                      message='Frontend connection accept failed ({})'.format(e)))
                     return
 
                 def _on_backend_joined(session, details):
@@ -510,8 +505,12 @@ class ProxyFrontendSession(object):
                                           authextra=dict(details.authextra or {}, **self._custom_authextra))
                     self._backend_session = session
                     self.transport.send(msg)
-                    self.log.info('Proxy frontend session WELCOME: session_id={session}, session={session}, session_details={details}',
-                                  session_id=hlid(self._session_id), session=self, details=details)
+                    self.log.info(
+                        '{func} Proxy frontend session WELCOME: session_id={session}, session={session}, details="{details}"',
+                        func=hltype(self._process_Hello),
+                        session_id=hlid(self._session_id),
+                        session=self,
+                        details=details)
 
                 session.on('join', _on_backend_joined)
 
@@ -525,32 +524,37 @@ class ProxyFrontendSession(object):
 
             # should not arrive here: internal (logic) error
             else:
-                self.transport.send(message.Abort(ApplicationError.AUTHENTICATION_FAILED,
-                                                  message='internal error: unexpected authenticator return type {}'.format(type(hello_result))))
+                self.transport.send(
+                    message.Abort(ApplicationError.AUTHENTICATION_FAILED,
+                                  message='internal error: unexpected authenticator return type {}'.format(
+                                      type(hello_result))))
             return
 
         self.transport.send(message.Abort(ApplicationError.NO_AUTH_METHOD, message='no suitable authmethod found'))
 
     @inlineCallbacks
     def _process_Authenticate(self, msg):
-        self.log.info('{klass}._process_Authenticate(msg={msg})', klass=self.__class__.__name__, msg=msg)
+        self.log.debug('{func}(msg={msg})', func=hltype(self._process_Authenticate), msg=msg)
         if self._pending_auth:
             if isinstance(self._pending_auth, PendingAuthTicket) or \
                isinstance(self._pending_auth, PendingAuthWampCra) or \
                isinstance(self._pending_auth, PendingAuthCryptosign) or \
                isinstance(self._pending_auth, PendingAuthScram):
                 auth_result = self._pending_auth.authenticate(msg.signature)
-                self.log.info(
-                    '{klass}._process_Authenticate() processed pending authentication {pending_auth}: {authresult}',
-                    klass=self.__class__.__name__, pending_auth=self._pending_auth, authresult=auth_result)
+                self.log.debug('{func} processed pending authentication {pending_auth}: {authresult}',
+                               func=hltype(self._process_Authenticate),
+                               pending_auth=self._pending_auth,
+                               authresult=auth_result)
                 if isinstance(auth_result, types.Accept):
                     try:
                         session = yield self._accept(auth_result)
                     except Exception as e:
                         self.log.failure()
-                        self.transport.send(message.Abort(ApplicationError.AUTHENTICATION_FAILED,
-                                                          message='Frontend connection accept failed ({})'.format(e)))
+                        self.transport.send(
+                            message.Abort(ApplicationError.AUTHENTICATION_FAILED,
+                                          message='Frontend connection accept failed ({})'.format(e)))
                     else:
+
                         def _on_backend_joined(session, details):
                             msg = message.Welcome(self._session_id,
                                                   ProxyFrontendSession.ROLES,
@@ -562,24 +566,31 @@ class ProxyFrontendSession(object):
                                                   authextra=dict(details.authextra or {}, **self._custom_authextra))
                             self._backend_session = session
                             self.transport.send(msg)
-                            self.log.info('Proxy frontend session WELCOME: session_id={session_id}, session={session}, msg={msg}',
-                                          session_id=hlid(self._session_id), session=self, msg=msg)
+                            self.log.debug(
+                                '{func} Proxy frontend session WELCOME: session_id={session_id}, session={session}, msg={msg}',
+                                func=hltype(self._process_Authenticate),
+                                session_id=hlid(self._session_id),
+                                session=self,
+                                msg=msg)
 
                         session.on('join', _on_backend_joined)
                 elif isinstance(auth_result, types.Deny):
                     self.transport.send(message.Abort(auth_result.reason, message=auth_result.message))
                 else:
                     # should not arrive here: logic error
-                    self.transport.send(message.Abort(ApplicationError.AUTHENTICATION_FAILED,
-                                                      message='internal error: unexpected authenticator return type {}'.format(type(auth_result))))
+                    self.transport.send(
+                        message.Abort(ApplicationError.AUTHENTICATION_FAILED,
+                                      message='internal error: unexpected authenticator return type {}'.format(
+                                          type(auth_result))))
             else:
                 # should not arrive here: logic error
-                self.transport.send(message.Abort(ApplicationError.AUTHENTICATION_FAILED,
-                                                  message='internal error: unexpected pending authentication'))
+                self.transport.send(
+                    message.Abort(ApplicationError.AUTHENTICATION_FAILED,
+                                  message='internal error: unexpected pending authentication'))
         else:
             # should not arrive here: client misbehaving!
-            self.transport.send(message.Abort(ApplicationError.AUTHENTICATION_FAILED,
-                                              message='no pending authentication'))
+            self.transport.send(
+                message.Abort(ApplicationError.AUTHENTICATION_FAILED, message='no pending authentication'))
 
 
 ITransportHandler.register(ProxyFrontendSession)
@@ -598,7 +609,6 @@ class ProxyBackendSession(Session):
     XXX before ^ just negotiate with the frontend to have the same
     serializer as the backend.
     """
-
     def onOpen(self, transport):
         # instance of Frontend
         self._frontend = transport._proxy_other_side
@@ -616,9 +626,7 @@ class ProxyBackendSession(Session):
 
     def onChallenge(self, challenge):
         if challenge.method == "cryptosign-proxy":
-            return super(ProxyBackendSession, self).onChallenge(
-                types.Challenge("cryptosign", extra=challenge.extra)
-            )
+            return super(ProxyBackendSession, self).onChallenge(types.Challenge("cryptosign", extra=challenge.extra))
 
         return super(ProxyBackendSession, self).onChallenge(challenge)
 
@@ -664,7 +672,7 @@ def make_backend_connection(backend_config, frontend_session, cbdir):
     transport that is definitely connected (e.g. you can send a Hello
     right away).
 
-    :param backend_config: Backend connection configuration, for example:
+    Backend connection configuration, for example:
 
         .. code-block:: json
             {
@@ -685,10 +693,16 @@ def make_backend_connection(backend_config, frontend_session, cbdir):
                 }
             }
 
+    :param backend_config: Proxy backend connection
+    :type connection: :class:`ProxyConnection`
+
     :param frontend_session: The frontend proxy session for which to create a mapped backend connection.
 
     :param cbdir: The node directory.
     """
+    log.info('{func}() connecting with config=\n{config}',
+             func=hltype(make_backend_connection),
+             config=pformat(backend_config))
 
     from twisted.internet import reactor
 
@@ -710,13 +724,17 @@ def make_backend_connection(backend_config, frontend_session, cbdir):
         # that machine, any website can try to access the "real"
         # backend)
         if 'auth' not in backend_config or 'anonymous-proxy' in backend_config['auth']:
-            if backend_config['transport']['endpoint']['type'] == 'unix':
+            # FIXME
+            if True or backend_config['transport']['endpoint']['type'] == 'unix':
                 session.add_authenticator(create_authenticator("anonymous"))
             else:
-                raise RuntimeError('anonymous-proxy authenticator only allowed on Unix domain socket based transports, not type "{}"'.format(backend_config['transport']['endpoint']['type']))
+                raise RuntimeError(
+                    'anonymous-proxy authenticator only allowed on Unix domain socket based transports, not type "{}"'.
+                    format(backend_config['transport']['endpoint']['type']))
 
         def connected(session, transport):
             connected_d.callback(session)
+
         session.on('connect', connected)
         return session
 
@@ -732,6 +750,7 @@ def make_backend_connection(backend_config, frontend_session, cbdir):
     def _error(f):
         if not connected_d.called:
             connected_d.errback(f)
+
     transport_d.addErrback(_error)
     transport_d.addCallback(_connected)
 
@@ -745,7 +764,6 @@ class AuthenticatorSession(ApplicationSession):
     CHANNEL_BINDING = None
 
     def __init__(self, config=None):
-        self.log.info("initializing component: {config}", config=config)
         ApplicationSession.__init__(self, config)
 
         # load the client private key (raw format)
@@ -756,11 +774,11 @@ class AuthenticatorSession(ApplicationSession):
             if self.is_attached():
                 self.leave()
         else:
-            self.log.info("client public key loaded: {}".format(
-                self._key.public_key()))
+            self.log.info('{func} client public key loaded: {pubkey}',
+                          pubkey=hlval(self._key.public_key()),
+                          func=hltype(self.__init__))
 
     def onConnect(self):
-        self.log.info("connected to router")
         extra = {
             'pubkey': self._key.public_key(),
         }
@@ -770,8 +788,6 @@ class AuthenticatorSession(ApplicationSession):
                   authextra=extra)
 
     async def onChallenge(self, challenge):
-        self.log.info(
-            "authentication challenge received: {challenge}", challenge=challenge)
         try:
             signed_challenge = await self._key.sign_challenge(self, challenge, channel_id_type=self.CHANNEL_BINDING)
             return signed_challenge
@@ -780,16 +796,15 @@ class AuthenticatorSession(ApplicationSession):
             raise
 
     def onJoin(self, details):
-        self.log.info('session joined: {details}', details=details)
         if self.config.extra['ready']:
             self.config.extra['ready'].callback(self)
             self.config.extra['ready'] = None
 
     def onLeave(self, details):
-        self.log.info("session closed: {details}", details=details)
+        self.log.info('{func} session closed: {details}', details=details, func=hltype(self.onDisconnect))
 
     def onDisconnect(self):
-        self.log.info("connection to router closed")
+        self.log.info('{func} connection closed', func=hltype(self.onDisconnect))
 
 
 def make_authenticator_session(backend_config, cbdir, realm, extra=None, reactor=None):
@@ -823,11 +838,9 @@ def make_authenticator_session(backend_config, cbdir, realm, extra=None, reactor
             transports=[backend_config['transport']],
             realm=realm,
             extra=extra,
-            authentication={
-                "cryptosign": {
-                    "privkey": _read_node_key(cbdir, private=True)['hex'],
-                }
-            },
+            authentication={"cryptosign": {
+                "privkey": _read_node_key(cbdir, private=True)['hex'],
+            }},
         )
         ready = Deferred()
 
@@ -847,8 +860,268 @@ def make_authenticator_session(backend_config, cbdir, realm, extra=None, reactor
         raise
 
 
-# implements IRealmContainer
-class ProxyController(_TransportController):
+STATE_CREATED = 1
+STATE_STARTING = 2
+STATE_STARTED = 3
+STATE_FAILED = 4
+STATE_STOPPING = 5
+STATE_STOPPED = 6
+
+STATES = {
+    STATE_CREATED: "created",
+    STATE_STARTING: "starting",
+    STATE_STARTED: "started",
+    STATE_FAILED: "failed",
+    STATE_STOPPING: "stopping",
+    STATE_STOPPED: "stopped",
+}
+
+
+class ProxyRoute(object):
+    """
+    Proxy backend route intra-node run-time representation.
+    """
+    log = make_logger()
+
+    def __init__(self, controller, realm_name, route_id, config):
+        """
+
+        :param controller: The (proxy) worker controller session the proxy connection is created from.
+        :type controller: crossbar.worker.proxy.ProxyController
+
+        :param route_id: The run-time route ID within the proxy worker.
+        :type route_id: str
+
+        :param config: The proxy route's configuration.
+        :type config: dict
+        """
+        self._controller = controller
+        self._realm_name = realm_name
+        self._route_id = route_id
+        self._config = config
+        self._started = None
+        self._stopped = None
+        self._state = STATE_CREATED
+
+    def marshal(self):
+        return {
+            'realm': self._realm_name,
+            'id': self._route_id,
+            'config': self._config,
+            'started': self._started,
+            'stopped': self._stopped,
+            'state': self._state,
+        }
+
+    def __str__(self):
+        return pformat(self.marshal())
+
+    @property
+    def realm(self):
+        """
+
+        :return: The realm this route applies to.
+        """
+        return self._realm_name
+
+    @property
+    def config(self):
+        """
+
+        :return: The original configuration as supplied to this proxy route.
+        """
+        return self._config
+
+    @property
+    def started(self):
+        """
+
+        :return: When this route was started (the run-time, in-memory object instantiated).
+        """
+        return self._started
+
+    @property
+    def stopped(self):
+        """
+
+        :return: When this route was stopped (the run-time, in-memory object instantiated).
+        """
+        return self._stopped
+
+    @property
+    def state(self):
+        """
+
+        :return: Current state of route.
+        """
+        return self._state
+
+    @inlineCallbacks
+    def start(self):
+        """
+        Start proxy route.
+        """
+        assert self._state == STATE_CREATED
+        self._state = STATE_STARTING
+
+        topic = '{}.on_proxy_route_starting'.format(self._controller._uri_prefix)
+        yield self._controller.publish(topic, self.marshal(), options=types.PublishOptions(acknowledge=True))
+
+        self._state = STATE_STARTED
+        self._started = time_ns()
+
+        topic = '{}.on_proxy_route_started'.format(self._controller._uri_prefix)
+        yield self._controller.publish(topic, self.marshal(), options=types.PublishOptions(acknowledge=True))
+
+    @inlineCallbacks
+    def stop(self):
+        """
+        Stop proxy route.
+        """
+        assert self._state == STATE_STARTED
+        self._state = STATE_STOPPING
+
+        topic = '{}.on_proxy_route_stopping'.format(self._controller._uri_prefix)
+        yield self._controller.publish(topic, self.marshal(), options=types.PublishOptions(acknowledge=True))
+
+        self._state = STATE_STOPPED
+        self._stopped = time_ns()
+
+        topic = '{}.on_proxy_route_stopped'.format(self._controller._uri_prefix)
+        yield self._controller.publish(topic, self.marshal(), options=types.PublishOptions(acknowledge=True))
+
+
+class ProxyConnection(object):
+    """
+    Proxy backend connection intra-node run-time representation.
+    """
+    log = make_logger()
+
+    def __init__(self, controller, connection_id, config):
+        """
+
+        :param worker: The (proxy) worker controller session the proxy connection is created from.
+        :type worker: crossbar.worker.proxy.ProxyController
+
+        :param connection_id: The run-time connection ID within the proxy worker.
+        :type connection_id: str
+
+        :param config: The proxy connection's configuration.
+        :type config: dict
+        """
+        self._controller = controller
+        self._connection_id = connection_id
+        self._config = config
+        self._started = None
+        self._stopped = None
+        self._state = STATE_CREATED
+
+    def marshal(self):
+        return {
+            'id': self._connection_id,
+            'config': self._config,
+            'started': self._started,
+            'stopped': self._stopped,
+            'state': self._state,
+        }
+
+    def __str__(self):
+        return pformat(self.marshal())
+
+    @property
+    def id(self):
+        """
+
+        :return: The ID of this proxy backend connection.
+        """
+        return self._connection_id
+
+    @property
+    def config(self):
+        """
+
+        :return: The original configuration as supplied to this proxy backend connection.
+        """
+        return self._config
+
+    @property
+    def started(self):
+        """
+
+        :return: When this proxy backend connection was started.
+        """
+        return self._started
+
+    @property
+    def stopped(self):
+        """
+
+        :return: When this proxy backend connection was stopped.
+        """
+        return self._stopped
+
+    @property
+    def state(self):
+        """
+
+        :return: Current state of this proxy backend connection.
+        """
+        return self._state
+
+    @inlineCallbacks
+    def start(self):
+        """
+        Start this proxy backend connection.
+        """
+        assert self._state == STATE_CREATED
+        self._state = STATE_STARTING
+
+        topic = '{}.on_proxy_connection_starting'.format(self._controller._uri_prefix)
+        yield self._controller.publish(topic, self.marshal(), options=types.PublishOptions(acknowledge=True))
+
+        self._state = STATE_STARTED
+        self._started = time_ns()
+
+        topic = '{}.on_proxy_connection_started'.format(self._controller._uri_prefix)
+        yield self._controller.publish(topic, self.marshal(), options=types.PublishOptions(acknowledge=True))
+
+    @inlineCallbacks
+    def stop(self):
+        """
+        Stop this proxy backend connection.
+        """
+        assert self._state == STATE_STARTED
+        self._state = STATE_STOPPING
+
+        topic = '{}.on_proxy_connection_stopping'.format(self._controller._uri_prefix)
+        yield self._controller.publish(topic, self.marshal(), options=types.PublishOptions(acknowledge=True))
+
+        self._state = STATE_STOPPED
+        self._stopped = time_ns()
+
+        topic = '{}.on_proxy_connection_stopped'.format(self._controller._uri_prefix)
+        yield self._controller.publish(topic, self.marshal(), options=types.PublishOptions(acknowledge=True))
+
+
+class ProxyController(TransportController):
+    """
+    Controller for proxy workers. Manages:
+
+    * **proxy transports**, for accepting incoming client connections
+    * **proxy connections**, for backend router connections
+    * **proxy routes**, for routes from ``(realm_name, role_name)`` to backend router connections
+
+    and
+
+    * web transport services (from base class `TransportController`), when running a proxy transport
+    of type ``web``.
+
+    Proxy controllers also inherit more procedures and events from the base classes
+
+    * :class:`crossbar.worker.transport.TransportController`,
+    * :class:`crossbar.worker.controller.WorkerController` and
+    * :class:`crossbar.common.process.NativeProcess`.
+    """
     WORKER_TYPE = 'proxy'
     WORKER_TITLE = 'WAMP proxy'
 
@@ -861,14 +1134,18 @@ class ProxyController(_TransportController):
 
         self._cbdir = config.extra.cbdir
         self._reactor = reactor
-        self._transports = dict()
-        self._routes = dict()  # realm -> dict
 
-        # map: transport ID -> RouterTransport
-        self.transports = {}
+        # map: realm name -> ProxyRoute
+        self._routes = dict()
 
-        # will be set up via Node by start_proxy_connection et al.
-        self._backend_configs = dict()
+        # for creating route-id's
+        self._next_route_id = 0
+
+        # next route to use in a realm while forwarding connections
+        self._roundrobin_idx = 0
+
+        # map: connection ID -> ProxyConnection
+        self._connections = {}
 
         # since we share some functionality with RouterController we
         # need to have a router_session_factory
@@ -889,63 +1166,91 @@ class ProxyController(_TransportController):
         """
         Check if a route to a realm with the given name is currently running.
 
-        :param realm: Realm name (_not_ ID).
+        :param realm: Realm name (the WAMP name, _not_ the run-time object ID).
         :type realm: str
 
-        :returns: True if a route to the realm exists.
+        :returns: True if a route to the realm (for any role) exists.
         :rtype: bool
         """
         result = realm in self._routes
-        self.log.info('{func}(realm="{realm}") -> {result}', func=hltype(ProxyController.has_realm),
-                      realm=hlid(realm), result=hlval(result))
+        self.log.debug('{func}(realm="{realm}") -> {result}',
+                       func=hltype(ProxyController.has_realm),
+                       realm=hlid(realm),
+                       result=hlval(result))
         return result
 
     def has_role(self, realm: str, authrole: str) -> bool:
         """
         Check if a role with the given name is currently running in the given realm.
 
-        :param realm: WAMP realm (name, _not_ run-time ID).
+        :param realm: WAMP realm (the WAMP name, _not_ the run-time object ID).
         :type realm: str
 
-        :param authrole: WAMP authentication role (URI, _not_ run-time ID).
+        :param authrole: WAMP authentication role (the WAMP URI, _not_ the run-time object ID).
         :type authrole: str
 
-        :returns: True if realm is running.
+        :returns: True if a route to the realm for the role exists.
         :rtype: bool
         """
         authrole = authrole or 'trusted'
-        result = authrole in self._routes.get(realm, {})
-        self.log.info('{func}(realm="{realm}", authrole="{authrole}") -> {result}',
-                      func=hltype(ProxyController.has_role), realm=hlid(realm), authrole=hlid(authrole),
-                      result=hlval(result))
+        if realm in self._routes:
+            realm_routes = self._routes[realm]
+
+            # the route config is a map with role name as key
+            result = any(authrole in route.config for route in realm_routes.values())
+        else:
+            result = False
+        self.log.debug('{func}(realm="{realm}", authrole="{authrole}") -> {result}',
+                       func=hltype(ProxyController.has_role),
+                       realm=hlid(realm),
+                       authrole=hlid(authrole),
+                       result=hlval(result))
         return result
 
     @inlineCallbacks
     def get_service_session(self, realm, authrole):
         """
-        IRealmContainer (this is used by dynamic authenticators)
+        Returns the service session on the given realm. The service session is used to access
+        the WAMP meta API for the realm and register authenticators.
+
+        :param realm: WAMP realm (the WAMP name, _not_ the run-time object ID).
+        :type realm: str
+
+        :param authrole: WAMP authentication role (the WAMP URI, _not_ the run-time object ID).
+        :type authrole: str
+
+        :returns: The service session for the realm.
+        :rtype: :class:`ApplicationSession`
         """
         try:
             self.log.info('{klass}.get_service_session(realm="{realm}", authrole="{authrole}")',
-                          klass=self.__class__.__name__, realm=realm, authrole=authrole)
+                          klass=self.__class__.__name__,
+                          realm=realm,
+                          authrole=authrole)
             if realm not in self._service_sessions:
                 if self.has_realm(realm):
-                    self.log.info('{klass}.get_service_session(realm="{realm}") -> not cached, creating new session ..',
-                                  klass=self.__class__.__name__, realm=realm)
+                    self.log.info(
+                        '{klass}.get_service_session(realm="{realm}") -> not cached, creating new session ..',
+                        klass=self.__class__.__name__,
+                        realm=realm)
                     # self._service_sessions[realm] = yield self.map_backend(None, realm, None, 'authenticator', None)
                     backend_config = self.get_backend_config(realm, authrole)
-                    self._service_sessions[realm] = yield make_authenticator_session(backend_config, self._cbdir, realm)
+                    self._service_sessions[realm] = yield make_authenticator_session(
+                        backend_config, self._cbdir, realm)
                 else:
                     # mark as non-existing!
                     self._service_sessions[realm] = None
 
             if self._service_sessions[realm]:
                 self.log.info('{klass}.get_service_session(realm="{realm}") -> cached service session {session}',
-                              klass=self.__class__.__name__, realm=realm, session=self._service_sessions[realm]._session_id)
+                              klass=self.__class__.__name__,
+                              realm=realm,
+                              session=self._service_sessions[realm]._session_id)
                 return self._service_sessions[realm]
             else:
                 self.log.info('{klass}.get_service_session(realm="{realm}") -> no such realm!',
-                              klass=self.__class__.__name__, realm=realm)
+                              klass=self.__class__.__name__,
+                              realm=realm)
                 return None
         except:
             self.log.failure()
@@ -953,8 +1258,10 @@ class ProxyController(_TransportController):
 
     def can_map_backend(self, session_id, realm, authid, authrole, authextra):
         """
+        Checks if the proxy can map the incoming frontend session to a backend.
+
         :returns: True only-if map_backend() can succeed later for the
-        same args (essentially, if the realm + role exist).
+            same args (essentially, if the realm + role exist).
         """
         return self.has_realm(realm) and self.has_role(realm, authrole)
 
@@ -966,9 +1273,14 @@ class ProxyController(_TransportController):
 
         :returns: a protocol instance connected to the backend
         """
-        self.log.info('{klass}.map_backend(frontend={frontend}, realm="{realm}", authid="{authid}", authrole="{authrole}", authextra={authextra})',
-                      klass=self.__class__.__name__, frontend=frontend, realm=hlid(realm), authid=hlid(authid), authrole=hlid(authrole),
-                      authextra=authextra)
+        self.log.debug(
+            '{func}(frontend={frontend}, realm="{realm}", authid="{authid}", authrole="{authrole}", authextra={authextra})',
+            func=hltype(self.map_backend),
+            frontend=frontend,
+            realm=hlid(realm),
+            authid=hlid(authid),
+            authrole=hlid(authrole),
+            authextra=authextra)
         if frontend in self._backends_by_frontend:
             return self._backends_by_frontend[frontend]
 
@@ -978,22 +1290,28 @@ class ProxyController(_TransportController):
         # insert the node's private key
 
         if authrole is None:
-            if len(self._routes.get(realm, {})) != 1:
-                raise RuntimeError(
-                    "Cannot select default role unless realm has exactly 1"
-                )
+            if len(self._routes.get(realm, set())) != 1:
+                raise RuntimeError("Cannot select default role unless realm has exactly 1")
 
-        self.log.info('{klass}.map_backend(): opening backend connection for realm "{realm}", authrole "{authrole}" using backend_config\n{backend_config}',
-                      klass=self.__class__.__name__, backend_config=pformat(backend_config), realm=hlid(realm), authrole=hlid(authrole))
+        self.log.debug(
+            '{func}: opening proxy backend connection for realm "{realm}", authrole "{authrole}" using backend_config\n{backend_config}',
+            func=hltype(self.map_backend),
+            backend_config=pformat(backend_config),
+            realm=hlid(realm),
+            authrole=hlid(authrole))
 
         backend_proto = yield make_backend_connection(backend_config, frontend, self._cbdir)
 
         if frontend:
             self._backends_by_frontend[frontend] = backend_proto
 
-        self.log.info('{klass}.map_backend(): ok, backend session {session_id} opened for realm "{realm}", authrole "{authrole}"',
-                      klass=self.__class__.__name__, backend_config=pformat(backend_config), realm=hlid(realm),
-                      authrole=hlid(authrole), session_id=backend_proto._session_id)
+        self.log.info(
+            '{func}: ok, proxy backend session {session_id} opened mapping frontend session to realm "{realm}", authrole "{authrole}"',
+            func=hltype(self.map_backend),
+            backend_config=pformat(backend_config),
+            realm=hlid(realm),
+            authrole=hlid(authrole),
+            session_id=hlid(backend_proto._session_id))
 
         returnValue(backend_proto)
 
@@ -1001,34 +1319,50 @@ class ProxyController(_TransportController):
         """
         Unmap the backend session from the given frontend session it is currently mapped to.
         """
-        self.log.info('{klass}.unmap_backend(frontend={frontend}, backend={backend})', klass=self.__class__.__name__,
-                      frontend=frontend, backend=backend)
+        self.log.debug('{func}(frontend={frontend}, backend={backend})',
+                       func=hltype(self.unmap_backend),
+                       frontend=frontend,
+                       backend=backend)
         if frontend in self._backends_by_frontend:
             if self._backends_by_frontend[frontend] == backend:
                 # alright, the given frontend is indeed currently mapped to the given backend session: close the
                 # session and delete it
                 backend.leave()
                 del self._backends_by_frontend[frontend]
-                self.log.info('{klass}.unmap_backend: ok, unmapped frontend session {frontend_session_id} from backend session {backend_session_id}',
-                              klass=self.__class__.__name__, frontend_session_id=frontend._session_id,
-                              backend_session_id=backend._session_id)
+                self.log.info(
+                    '{func}: ok, unmapped frontend session {frontend_session_id} from backend session {backend_session_id}',
+                    func=hltype(self.unmap_backend),
+                    frontend_session_id=hlid(frontend._session_id),
+                    backend_session_id=hlid(backend._session_id))
             else:
-                self.log.warn('{klass}.unmap_backend: frontend session {frontend_session_id} currently mapped to backend session {backend_session_id} - NOT to specified backend {specified_session_id}'.format(
-                    klass=self.__class__.__name__, frontend_session_id=frontend._session_id,
-                    backend_session_id=self._backends_by_frontend[frontend]._session_id,
-                    specified_session_id=backend._session_id))
+                self.log.warn(
+                    '{func}: frontend session {frontend_session_id} currently mapped to backend session {backend_session_id} - NOT to specified backend {specified_session_id}'
+                    .format(func=hltype(self.unmap_backend),
+                            frontend_session_id=hlid(frontend._session_id),
+                            backend_session_id=hlid(self._backends_by_frontend[frontend]._session_id),
+                            specified_session_id=hlid(backend._session_id)))
         else:
             if frontend:
-                self.log.warn('{klass}.unmap_backend: frontend session {session_id} not currently mapped to any backend',
-                              klass=self.__class__.__name__, session_id=frontend._session_id)
+                self.log.warn('{func}: frontend session {session_id} not currently mapped to any backend',
+                              func=hltype(self.unmap_backend),
+                              session_id=hlid(frontend._session_id))
 
     def get_backend_config(self, realm_name, role_name):
         """
-        :returns: a dict containing the configure for the backend
+        Return backend connection information for the given backend realm and role.
+
+        :returns: a dict containing the connection configuration for the backend
             identified by the realm_name and role_name
         """
-        backend_name = self._routes[realm_name][role_name]['backend_name']
-        return self._backend_configs[backend_name]
+        assert self.has_role(realm_name, role_name)
+
+        routes = self._routes[realm_name]
+        self._roundrobin_idx = (self._roundrobin_idx + 1) % len(routes)
+        route = list(routes.values())[self._roundrobin_idx]
+
+        connection_id = route.config[role_name]
+        connection = self._connections[connection_id]
+        return connection.config
 
     @inlineCallbacks
     def onJoin(self, details):
@@ -1036,51 +1370,89 @@ class ProxyController(_TransportController):
         Called when worker process has joined the node's management realm.
         """
         self.log.info(
-            'Proxy worker "{worker_id}" session {session_id} initializing ..',
-            worker_id=self._worker_id,
-            session_id=details.session,
+            '{func} Proxy worker "{worker_id}" session {session_id} initializing ..',
+            func=hltype(self.onJoin),
+            worker_id=hlid(self._worker_id),
+            session_id=hlid(details.session),
         )
 
         yield WorkerController.onJoin(self, details, publish_ready=False)
 
         yield self.publish_ready()
 
+    @wamp.register(None)
+    def get_proxy_transports(self, details=None):
+        """
+        Get proxy (listening) transports currently running in this proxy worker.
+
+        :param details: Call details.
+        :type details: :class:`autobahn.wamp.types.CallDetails`
+
+        :returns: List of transport IDs of transports currently running.
+        :rtype: list
+        """
+        self.log.debug('{func}(caller_authid="{caller_authid}")',
+                       func=hltype(self.get_proxy_transports),
+                       caller_authid=hlval(details.caller_authid))
+        return sorted(self.transports.keys())
+
+    @wamp.register(None)
+    def get_proxy_transport(self, transport_id, details=None):
+        """
+        Get transport currently running in this proxy worker.
+
+        :param details: Call details.
+        :type details: :class:`autobahn.wamp.types.CallDetails`
+
+        :returns: List of transports currently running.
+        :rtype: dict
+        """
+        self.log.debug('{func}(transport_id={transport_id})',
+                       func=hltype(self.get_proxy_transport),
+                       transport_id=hlid(transport_id),
+                       caller_authid=hlval(details.caller_authid))
+
+        if transport_id in self.transports:
+            transport = self.transports[transport_id]
+            return transport.marshal()
+        else:
+            raise ApplicationError("crossbar.error.no_such_object", "No transport {}".format(transport_id))
+
     @inlineCallbacks
     @wamp.register(None)
     def start_proxy_transport(self, transport_id, config, details=None):
-        self.log.debug(
-            "start_proxy_transport: transport_id={transport_id}, config={config}",
-            transport_id=transport_id,
-            config=config,
-        )
-        self.log.info(
-            "start_proxy_transport: transport_id={transport_id}",
-            transport_id=transport_id,
-        )
+        """
+        Start a new proxy front-end listening transport.
 
-        self.log.info(
-            'Starting proxy transport "{transport_id}" {method}',
-            transport_id=transport_id,
-            method=self.start_proxy_transport,
-        )
+        :param transport_id: The run-time ID to start the transport under.
+        :param config: The listening transport configuration.
+        :param details: WAMP call details.
+
+        :return: Proxy transport run-time metadata.
+        """
+        self.log.info('{func}(transport_id="{transport_id}", config={config})',
+                      func=hltype(self.start_proxy_transport),
+                      transport_id=hlid(transport_id),
+                      config='...',
+                      caller_authid=hlval(details.caller_authid))
 
         # prohibit starting a transport twice
         if transport_id in self.transports:
-            _emsg = 'Could not start transport: a transport with ID "{}" is already running (or starting)'.format(transport_id)
+            _emsg = 'Could not start transport: a transport with ID "{}" is already running (or starting)'.format(
+                transport_id)
             self.log.error(_emsg)
             raise ApplicationError('crossbar.error.already_running', _emsg)
 
         # create a transport and parse the transport configuration
         # (NOTE: yes, this is re-using create_router_transport so we
-        # can proxy every sevice a 'real' router can)
+        # can proxy every service a 'real' router can)
         proxy_transport = self.personality.create_router_transport(self, transport_id, config)
 
         caller = details.caller if details else None
-        event = {
-            'id': transport_id
-        }
-        topic = '{}.on_proxy_transport_starting'.format(self._uri_prefix)
-        self.publish(topic, event, options=types.PublishOptions(exclude=caller))
+        transport_started = proxy_transport.marshal()
+        self.publish('{}.on_proxy_transport_starting'.format(self._uri_prefix),
+                     transport_started,
+                     options=types.PublishOptions(exclude=caller))
 
         # start listening ..
         try:
@@ -1089,65 +1461,253 @@ class ProxyController(_TransportController):
             _emsg = "Cannot listen on transport endpoint: {log_failure}"
             self.log.error(_emsg, log_failure=err)
 
-            topic = '{}.on_proxy_transport_stopped'.format(self._uri_prefix)
-            self.publish(topic, event, options=types.PublishOptions(exclude=caller))
+            self.publish('{}.on_proxy_transport_stopped'.format(self._uri_prefix),
+                         transport_started,
+                         options=types.PublishOptions(exclude=caller))
 
             raise ApplicationError("crossbar.error.cannot_listen", _emsg.format(log_failure=err))
 
         self.transports[transport_id] = proxy_transport
-        self.log.debug('Router transport "{transport_id}" started and listening', transport_id=transport_id)
 
-        topic = '{}.on_proxy_transport_started'.format(self._uri_prefix)
-        self.publish(topic, event, options=types.PublishOptions(exclude=caller))
+        self.publish('{}.on_proxy_transport_started'.format(self._uri_prefix),
+                     transport_started,
+                     options=types.PublishOptions(exclude=caller))
+
+        self.log.info('{func} Ok, proxy transport "{transport_id}" started and listening!',
+                      func=hltype(self.start_proxy_transport),
+                      transport_id=hlid(transport_id))
 
         returnValue(proxy_transport.marshal())
 
     @inlineCallbacks
     @wamp.register(None)
-    def stop_proxy_transport(self, name, details=None):
-        if name not in self._transports:
-            raise ApplicationError(
-                "crossbar.error.worker_not_running",
-                "No such worker '{}'".format(name),
-            )
-        yield self._transports[name].port.stopListening()
-        del self._transports[name]
+    def stop_proxy_transport(self, transport_id, details=None):
+        """
+        Stop a currently running proxy front-end listening transport.
+
+        :param transport_id: The run-time ID of the transport to stop.
+        :param details: WAMP call details.
+        :return: Proxy transport run-time information.
+        """
+        if transport_id not in self._transports:
+            raise ApplicationError('crossbar.error.no_such_object',
+                                   'no proxy transport with ID "{}" currently running'.format(transport_id))
+
+        caller = details.caller if details else None
+        transport_stopped = self._transports[transport_id].marshal()
+
+        self.publish('{}.on_proxy_transport_stopping'.format(self._uri_prefix),
+                     transport_stopped,
+                     options=types.PublishOptions(exclude=caller))
+
+        yield self._transports[transport_id].port.stopListening()
+        del self._transports[transport_id]
+
+        self.publish('{}.on_proxy_transport_stopping'.format(self._uri_prefix),
+                     transport_stopped,
+                     options=types.PublishOptions(exclude=caller))
+
+        return transport_stopped
 
     @wamp.register(None)
-    def start_proxy_route(self, realm_name, config, details=None):
+    def get_proxy_routes(self, details=None):
+        """
+        Get proxy routes currently running in this proxy worker.
+
+        :param details: Call details.
+        :type details: :class:`autobahn.wamp.types.CallDetails`
+
+        :returns: List of (target) realm names in proxy routes currently running.
+        :rtype: list
+        """
+        self.log.debug('{func}(caller_authid="{caller_authid}")',
+                       func=hltype(self.get_proxy_routes),
+                       caller_authid=hlval(details.caller_authid))
+        return sorted(self._routes.keys())
+
+    @wamp.register(None)
+    def list_proxy_realm_routes(self, realm_name, details=None):
+        """
+        Get list of all routes enabled for a particular realm
+        """
+        if realm_name in self._routes:
+            return [self._routes[realm_name][route_id].marshal() for route_id in self._routes[realm_name].keys()]
+        else:
+            raise ApplicationError("crossbar.error.no_such_object",
+                                   'No route for realm "{}" in proxy'.format(realm_name))
+
+    @wamp.register(None)
+    def get_proxy_realm_route(self, realm_name, route_id, details=None):
+        """
+        Get a particular realm-route
+
+        :param details: Call details.
+        :type details: :class:`autobahn.wamp.types.CallDetails`
+
+        :returns: Proxy route object.
+        :rtype: dict
+        """
+        self.log.debug('{func}(realm_name={realm_name})',
+                       func=hltype(self.get_proxy_realm_route),
+                       realm_name=hlid(realm_name),
+                       caller_authid=hlval(details.caller_authid))
+
+        try:
+            return self._routes[realm_name][route_id]
+        except KeyError:
+            raise ApplicationError("crossbar.error.no_such_object",
+                                   'No route "{}" for realm "{}" in proxy'.format(route_id, realm_name))
+
+    @inlineCallbacks
+    @wamp.register(None)
+    def start_proxy_realm_route(self, realm_name, config, details=None):
+        """
+        Start a new proxy route for the given realm.
+
+        :param realm_name: The realm this route should apply for.
+        :param config: The route configuration.
+        :param details: WAMP call details.
+        :return: Proxy route run-time information.
+        """
         self.log.info(
-            "start_proxy_route: realm_name={realm_name}, config={config}",
+            '{func}(realm_name="{realm_name}", config={config})',
+            func=hltype(self.start_proxy_realm_route),
             realm_name=realm_name,
             config=config,
         )
-        if realm_name in self._routes:
-            raise Exception("Already have realm '{}'".format(realm_name))
 
-        route_role = dict()
-        for role_name in config:
-            route_role[role_name] = {
-                "backend_name": config[role_name],
-            }
-        self._routes[realm_name] = route_role
+        for role_name in config.keys():
+            connection_id = config[role_name]
+            if connection_id not in self._connections:
+                raise ApplicationError(
+                    "crossbar.error.no_such_object",
+                    'no connection "{}" found for realm "{}" and role "{}" in proxy route config'.format(
+                        connection_id, realm_name, role_name))
 
-        # FIXME: publish event; store in local metadata object
+        route_id = 'route{:03d}'.format(self._next_route_id)
+        self._next_route_id += 1
 
-        route_started = {
-            'started': time_ns(),
-            'realm': realm_name,
-            'route': route_role
-        }
-        return route_started
+        try:
+            routes = self._routes[realm_name]
+        except KeyError:
+            routes = dict()
+            self._routes[realm_name] = routes
+        route = ProxyRoute(self, realm_name, route_id, config)
+        routes[route_id] = route
+        yield route.start()
+
+        returnValue(route.marshal())
+
+    @inlineCallbacks
+    @wamp.register(None)
+    def stop_proxy_realm_route(self, realm_name, route_id, details=None):
+        """
+        Stop a currently running proxy route.
+
+        :param realm_name: The name of the realm to stop the route for.
+        :param route_id: Which route to stop
+        :param details: WAMP call details.
+        :return: Run-time information about the stopped route.
+        """
+        self.log.info('{func}(realm_name={realm_name}, caller_authid="{caller_authid}")',
+                      func=hltype(self.stop_proxy_route),
+                      realm_name=realm_name,
+                      caller_authid=hlval(details.caller_authid))
+        if realm_name not in self._routes:
+            raise ApplicationError('crossbar.error.no_such_object',
+                                   'no proxy routes for realm "{}" currently running'.format(realm_name))
+        if route_id not in self._routes[realm_name]:
+            raise ApplicationError('crossbar.error.no_such_object',
+                                   'no route "{}" for realm "{}" currently running'.format(route_id, realm_name))
+
+        route = self._routes[realm_name][route_id]
+        yield route.stop()
+        del self._routes[realm_name][route_id]
+
+        returnValue(route.marshal())
 
     @wamp.register(None)
-    def start_proxy_connection(self, name, options, details=None):
-        self.log.info(
-            "start_proxy_connection '{name}': {options}",
-            name=name,
-            options=options,
-        )
-        if name in self._backend_configs:
-            raise ValueError(
-                "Already have a connection named '{}'".format(name)
-            )
-        self._backend_configs[name] = options
+    def get_proxy_connections(self, details=None):
+        """
+        Get currently running proxy connections.
+
+        :param details: WAMP call details.
+        :return: List of run-time IDs of currently running connection.s
+        """
+        self.log.debug('{func}(caller_authid="{caller_authid}")',
+                       func=hltype(self.get_proxy_connections),
+                       caller_authid=hlval(details.caller_authid))
+
+        return sorted(self._connections.keys())
+
+    @wamp.register(None)
+    def get_proxy_connection(self, connection_id, details=None):
+        """
+        Get run-time information for a currently running proxy connection.
+
+        :param connection_id: The run-time ID of the proxy connection to return information for.
+        :param details: WAMP call details.
+        :return: Proxy connection configuration.
+        """
+        self.log.debug('{func}(connection_id={connection_id}, caller_authid="{caller_authid}")',
+                       func=hltype(self.get_proxy_connection),
+                       connection_id=hlid(connection_id),
+                       caller_authid=hlval(details.caller_authid))
+
+        if connection_id in self._connections:
+            connection = self._connections[connection_id]
+            return connection.marshal()
+        else:
+            raise ApplicationError("crossbar.error.no_such_object",
+                                   'no proxy connection with ID "{}" currently running'.format(connection_id))
+
+    @inlineCallbacks
+    @wamp.register(None)
+    def start_proxy_connection(self, connection_id, config, details=None):
+        """
+
+        :param connection_id:
+        :param config:
+        :param details:
+        :return:
+        """
+        self.log.info('{func}(connection_id={connection_id}, config={config}, caller_authid={caller_authid})',
+                      func=hltype(self.start_proxy_connection),
+                      connection_id=connection_id,
+                      config='...',
+                      caller_authid=hlval(details.caller_authid))
+        if connection_id in self._connections:
+            raise ApplicationError('crossbar.error.already_running',
+                                   'proxy connection with ID "{}" already running'.format(connection_id))
+
+        connection = ProxyConnection(self, connection_id, config)
+        self._connections[connection_id] = connection
+        yield connection.start()
+
+        returnValue(connection.marshal())
+
+    @inlineCallbacks
+    @wamp.register(None)
+    def stop_proxy_connection(self, connection_id, details=None):
+        """
+
+        :param connection_id:
+        :param details:
+        :return:
+        """
+        self.log.info('{func}(connection_id={connection_id}, caller_authid="{caller_authid}")',
+                      func=hltype(self.stop_proxy_connection),
+                      connection_id=connection_id,
+                      caller_authid=hlval(details.caller_authid))
+        if connection_id not in self._connections:
+            raise ApplicationError('crossbar.error.no_such_object',
+                                   'no proxy connection with ID "{}" currently running'.format(connection_id))
+
+        connection = self._connections[connection_id]
+        yield connection.stop()
+        del self._connections[connection_id]
+
+        returnValue(connection.marshal())
+
+
+IRealmContainer.register(ProxyController)
