@@ -68,7 +68,7 @@ txtorcon>=20.0.0
 u-msgpack-python>=2.4.1
 urllib3>=1.21.1,<1.27
 validate-email>=1.3
-vmprof>=0.4.15
+git+https://github.com/vmprof/vmprof-python.git@a1a1b5264ec0b197444c0053e44f8ae4ffed9353
 watchdog>=0.8.3
 web3>=5.13.1
 werkzeug>=0.14.1
