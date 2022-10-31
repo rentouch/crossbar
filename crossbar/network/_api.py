@@ -2,7 +2,7 @@
 
 ##############################################################################
 #
-#                        Crossbar.io FX
+#                        Crossbar.io
 #     Copyright (C) Crossbar.io Technologies GmbH. All rights reserved.
 #
 ##############################################################################
@@ -95,7 +95,8 @@ class Network(ApplicationSession):
         self.log.info('{klass}[{ident}].__init__()', klass=hl(self.__class__.__name__), ident=hlid(self.ident))
 
         self._dbpath = os.path.abspath(config.extra.get('dbpath', './.xbrnetwork'))
-        self._db = zlmdb.Database(dbpath=self._dbpath, maxsize=2**30, readonly=False, sync=True)
+        # self._db = zlmdb.Database(dbpath=self._dbpath, maxsize=2**30, readonly=False, sync=True, context=self)
+        self._db = zlmdb.Database.open(dbpath=self._dbpath, maxsize=2**30, readonly=False, sync=True, context=self)
         self._db.__enter__()
         self._meta = cfxdb.meta.Schema.attach(self._db)
         self._xbr = cfxdb.xbr.Schema.attach(self._db)
@@ -1573,7 +1574,7 @@ class Network(ApplicationSession):
             for the respective market. The difference is, the procedure is more general, in that
             it can return (basic) market information for any market, and in that the procedure is
             implemented in the `planet.xbr.network` backend rather than the XBR market maker running
-            on the Crossbar.io FX edge node of the operator of the respective market.
+            on the Crossbar.io edge node of the operator of the respective market.
 
         :param market_oid: OID of the XBR Data Market to retrieve information for.
 
@@ -2034,7 +2035,7 @@ class Network(ApplicationSession):
                              attributes: Optional[dict],
                              details: Optional[CallDetails] = None) -> dict:
         """
-        Create a new XBR Data Catalog.
+        Create a new XBR Data FbsRepository.
 
         :param member_oid: OID of the member to create the catalog under (the member will become catalog owner.).
 
@@ -2116,7 +2117,7 @@ class Network(ApplicationSession):
         :param details: Caller details.
         :type details: :class:`autobahn.wamp.types.CallDetails`
 
-        :return: Catalog creation information. For example:
+        :return: FbsRepository creation information. For example:
 
             .. code-block:: python
 
@@ -2129,7 +2130,7 @@ class Network(ApplicationSession):
                     'transaction_index': b'...'
                 }
 
-            * ``created``: Catalog creation timestamp (number of nanoseconds since the Unix epoch).
+            * ``created``: FbsRepository creation timestamp (number of nanoseconds since the Unix epoch).
             * ``catalog_oid``: ID of newly created catalog (16 bytes UUID).
         """
         self.log.info(
@@ -2154,7 +2155,7 @@ class Network(ApplicationSession):
                        signature: bytes,
                        details: Optional[CallDetails] = None):
         """
-        Remove an existing XBR Data Catalog.
+        Remove an existing XBR Data FbsRepository.
 
         :param member_oid: ID of the member to remove the data market under (must be owner).
 
@@ -2218,14 +2219,14 @@ class Network(ApplicationSession):
                     include_attributes: bool = False,
                     details: Optional[CallDetails] = None) -> dict:
         """
-        Retrieve basic information for the given XBR Data Catalog.
+        Retrieve basic information for the given XBR Data FbsRepository.
 
-        :param catalog_oid: OID of the XBR Data Catalog to retrieve information for.
+        :param catalog_oid: OID of the XBR Data FbsRepository to retrieve information for.
 
         :param details: Caller details.
         :type details: :class:`autobahn.wamp.types.CallDetails`
 
-        :return: Catalog information.
+        :return: FbsRepository information.
         """
         assert details is None or isinstance(
             details, CallDetails), 'details must be `autobahn.wamp.types.CallDetails`, but was `{}`'.format(details)
@@ -2325,7 +2326,7 @@ class Network(ApplicationSession):
                     attributes: Optional[dict] = None,
                     details: Optional[CallDetails] = None) -> dict:
         """
-        Publish an API to an existing XBR Data Catalog.
+        Publish an API to an existing XBR Data FbsRepository.
 
         :param member_oid: OID of the member to create the catalog under (the member will become catalog owner.).
 

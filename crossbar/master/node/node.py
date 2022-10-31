@@ -1,7 +1,7 @@
 ###############################################################################
 #
-# Crossbar.io FX Master
-# Copyright (c) Crossbar.io Technologies GmbH. All rights reserved.
+# Crossbar.io Master
+# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -30,6 +30,7 @@ from crossbar._util import hltype, hlid, hl, hlval
 from crossbar.common import checkconfig
 
 from crossbar._util import merge_config
+from crossbar.node.node import Node
 from crossbar.edge.node import node
 from crossbar.master.node.roles import BUILTIN_ROLES
 from crossbar.master.mrealm.mrealm import ManagementRealm
@@ -37,7 +38,7 @@ from cfxdb.globalschema import GlobalSchema
 
 __all__ = ('FabricServiceNodeManager', 'FabricCenterNode')
 
-_CFC_GLOBAL_REALM = u'crossbar.'
+_CFC_GLOBAL_REALM = 'crossbar.'
 
 
 class License(object):
@@ -133,7 +134,7 @@ class FabricServiceNodeManager(ApplicationSession):
         #
         ready = self.config.extra['ready']
         cbdir = self.config.extra['cbdir']
-        config = self.config.extra.get(u'database', {})
+        config = self.config.extra.get('database', {})
 
         # create database and attach tables to database slots
         #
@@ -151,7 +152,8 @@ class FabricServiceNodeManager(ApplicationSession):
                       dbpath=hlid(dbpath),
                       maxsize=hlid(maxsize))
 
-        self._db = zlmdb.Database(dbpath=dbpath, maxsize=maxsize, readonly=False, sync=True)
+        # self._db = zlmdb.Database(dbpath=dbpath, maxsize=maxsize, readonly=False, sync=True, context=self)
+        self._db = zlmdb.Database.open(dbpath=dbpath, maxsize=maxsize, readonly=False, sync=True, context=self)
         self._db.__enter__()
         self._schema = GlobalSchema.attach(self._db)
 
@@ -244,20 +246,20 @@ class FabricServiceNodeManager(ApplicationSession):
         # start the management realm and roles on the configured router worker
         if realm_name not in self._router_realms:
             realm_config = {
-                u'name': realm_name,
-                u'options': {
-                    u'enable_meta_api': True,
+                'name': realm_name,
+                'options': {
+                    'enable_meta_api': True,
 
                     # FIXME: enabling this will break stopping and restarting an mrealm, as the
                     # procedures registered eg by the RouterServiceAgent session will stick around!
-                    u'bridge_meta_api': False,
+                    'bridge_meta_api': False,
                 }
             }
             realm_id = realm_name
-            await self.call(u'crossbar.worker.{}.start_router_realm'.format(router_id), realm_id, realm_config)
+            await self.call('crossbar.worker.{}.start_router_realm'.format(router_id), realm_id, realm_config)
 
-            for role_id in [u'owner-role', u'backend-role', u'node-role', u'public-role']:
-                await self.call(u'crossbar.worker.{}.start_router_realm_role'.format(router_id), realm_id, role_id,
+            for role_id in ['owner-role', 'backend-role', 'node-role', 'public-role']:
+                await self.call('crossbar.worker.{}.start_router_realm_role'.format(router_id), realm_id, role_id,
                                 BUILTIN_ROLES[role_id])
 
             self._router_realms[realm_name] = True
@@ -276,7 +278,7 @@ class FabricServiceNodeManager(ApplicationSession):
                 # "restart": "restart-on-failed"
                 "restart": "restart-always"
             }
-            await self.call(u'crossbar.start_worker', container_id, u'container', container_options)
+            await self.call('crossbar.start_worker', container_id, 'container', container_options)
 
             self._container_workers[container_id] = {}
         else:
@@ -289,38 +291,38 @@ class FabricServiceNodeManager(ApplicationSession):
         component_id = realm_name
         if component_id not in self._container_workers[container_id]:
             mrealm_backend_extra = {
-                u'mrealm': str(mrealm.oid),
-                u'database': {
+                'mrealm': str(mrealm.oid),
+                'database': {
                     # the mrealm database path contains the mrealm UUID
-                    u'dbfile': os.path.join(self.config.extra['cbdir'], u'.db-mrealm-{}'.format(mrealm.oid)),
+                    'dbfile': os.path.join(self.config.extra['cbdir'], '.db-mrealm-{}'.format(mrealm.oid)),
 
                     # hard-code max mrealm database size to 2GB
                     # https://github.com/crossbario/crossbar/issues/235
-                    u'maxsize': 2**30 * 2,
+                    'maxsize': 2**30 * 2,
                 },
-                u'controller-database': {
+                'controller-database': {
                     # forward controller database parameters, so that the mrealm backend can _also_ open
                     # the controller database (read-only)
-                    u'dbfile': self._db.dbpath,
-                    u'maxsize': self._db.maxsize,
+                    'dbfile': self._db.dbpath,
+                    'maxsize': self._db.maxsize,
                 },
             }
             component_config = {
-                u'type': u'class',
-                u'classname': u'crossbar.master.mrealm.MrealmController',
-                u'realm': realm_name,
-                u'transport': {
+                'type': 'class',
+                'classname': 'crossbar.master.mrealm.MrealmController',
+                'realm': realm_name,
+                'transport': {
                     # we connect back to the master router over UDS/RawSocket/CBOR
-                    u'type': u'rawsocket',
-                    u'endpoint': {
-                        u'type': u'unix',
-                        u'path': u'sock1'
+                    'type': 'rawsocket',
+                    'endpoint': {
+                        'type': 'unix',
+                        'path': 'sock1'
                     },
-                    u'serializer': u'cbor',
+                    'serializer': 'cbor',
                 },
-                u'extra': mrealm_backend_extra
+                'extra': mrealm_backend_extra
             }
-            await self.call(u'crossbar.worker.{}.start_component'.format(container_id), component_id, component_config)
+            await self.call('crossbar.worker.{}.start_component'.format(container_id), component_id, component_config)
 
             self._container_workers[container_id][component_id] = True
         else:
@@ -344,26 +346,25 @@ class FabricServiceNodeManager(ApplicationSession):
         mrealm = ManagementRealm.parse(mrealm_obj)
 
         realm_name = mrealm.name
-        router_id = u'cfrouter1'
-        container_id = u'cfcontainer1'
+        router_id = 'cfrouter1'
+        container_id = 'cfcontainer1'
 
         if realm_name in self._router_realms:
             self.log.info('Deactivate realm ({}) - start'.format(realm_name))
 
             # stop the management component
             if True:
-                await self.call(u'crossbar.worker.{}.stop_component'.format(container_id), realm_name)
+                await self.call('crossbar.worker.{}.stop_component'.format(container_id), realm_name)
                 del self._container_workers[container_id][realm_name]
 
             # stop the router roles
             if True:
-                for role_id in [u'owner-role', u'backend-role', u'node-role', u'public-role']:
-                    await self.call(u'crossbar.worker.{}.stop_router_realm_role'.format(router_id), realm_name,
-                                    role_id)
+                for role_id in ['owner-role', 'backend-role', 'node-role', 'public-role']:
+                    await self.call('crossbar.worker.{}.stop_router_realm_role'.format(router_id), realm_name, role_id)
 
             #  stop the realm
             if True:
-                await self.call(u'crossbar.worker.{}.stop_router_realm'.format(router_id), realm_name)
+                await self.call('crossbar.worker.{}.stop_router_realm'.format(router_id), realm_name)
                 del self._router_realms[realm_name]
 
             self.log.info('Management realm "{realm_name}" deactivated (complete)', realm_name=realm_name)
@@ -373,15 +374,21 @@ class FabricServiceNodeManager(ApplicationSession):
 
 class FabricCenterNode(node.FabricNode):
     """
-    Crossbar.io FX Master node personality.
+    Crossbar.io Master node personality.
     """
     DEFAULT_CONFIG_PATH = 'master/node/config.json'
-
+    """
+    Builtin default master node configuration.
+    """
     def __init__(self, personality, cbdir=None, reactor=None, native_workers=None, options=None):
         node.FabricNode.__init__(self, personality, cbdir, reactor, native_workers, options)
-        self._config = None
+
+        # master node embedded DB
         self._db = None
         self._schema = None
+
+        # Web3 blockchain connection (if configured)
+        self._w3 = None
 
         # the node license under which this master node will be running (instance of :class:License)
         self._license = None
@@ -399,48 +406,64 @@ class FabricCenterNode(node.FabricNode):
         - and it contains a workers section (a list of workers), these are
         _added_ to the builtin workers.
         """
+        config_source = Node.CONFIG_SOURCE_EMPTY
 
-        # load builtin node configuration as default
+        # 1/4: load builtin master node configuration as default
         #
-        filename = pkg_resources.resource_filename('crossbar', self.DEFAULT_CONFIG_PATH)
-        with open(filename) as f:
+        config_path = pkg_resources.resource_filename('crossbar', self.DEFAULT_CONFIG_PATH)
+        with open(config_path) as f:
             config = json.load(f)
-            config_path = filename
-            config_source = self.CONFIG_SOURCE_DEFAULT
-            # self.personality.check_config(self.personality, config)
-        self.log.debug('Built-in node configuration loaded and checked')
 
-        # try loading node configuration from blockchain (overwriting the previously loaded default config)
-        # FIXME: domain/node configuration was removed from the XBRNetwork contract (for now)
-        # see: https://github.com/crossbario/xbr-protocol/pull/36
-        if False:
-            gateway_config = {
-                "type": "user",
-                "http": "http://localhost:1545",
-            }
+        # no need to check the builtin config (at run-time)
+        # self.personality.check_config(self.personality, config)
 
+        # remember config source
+        config_source += Node.CONFIG_SOURCE_DEFAULT
+        self.log.info('Built-in master node configuration loaded')
+
+        # 2/4: allow extending/overriding the node configuration
+        # with a local master node configuration file (eg for TLS setup)
+        if configfile:
+            config_path = os.path.abspath(os.path.join(self._cbdir, configfile))
+            with open(config_path) as f:
+                custom_config = json.load(f)
+
+            # as an overriding config file does not need to be a fully valid config in itself,
+            # do _not_ check it ..
+            # self.personality.check_config(self.personality, custom_config)
+
+            # .. instead, we merge the config from the local file into the already
+            # loaded default config (see above)
+            config = merge_config(config, custom_config)
+
+            # remember config source
+            config_source += Node.CONFIG_SOURCE_LOCALFILE
+            self.log.info('Local master node configuration merged from "{config_path}"',
+                          config_path=hlval(config_path))
+
+        # 3/4: allow extending/overriding the node configuration
+        # with a remote master node configuration file from blockchain/IPFS
+        if config.get('controller', {}).get('blockchain', None):
+            blockchain_config = config['controller']['blockchain']
+            gateway_config = blockchain_config['gateway']
+
+            # setup Web3 connection from blockchain gateway configuration
             self._w3 = make_w3(gateway_config)
+
+            # configure new Web3 connection as provider for XBR
             xbr.setProvider(self._w3)
 
             if self._w3.isConnected():
                 self.log.info('Connected to Ethereum network {network} at gateway "{gateway_url}"',
-                              network=self._w3.version.network,
+                              network=self._w3.net.version,
                               gateway_url=gateway_config['http'])
 
-                if 'XBR_DEBUG_TOKEN_ADDR' in os.environ:
-                    self.log.info('XBR Token contract address {token_addr} set from environment',
-                                  token_addr=hlid(os.environ['XBR_DEBUG_TOKEN_ADDR']))
-
-                if 'XBR_DEBUG_NETWORK_ADDR' in os.environ:
-                    self.log.info('XBR Network contract address {network_addr} set from environment',
-                                  network_addr=hlid(os.environ['XBR_DEBUG_NETWORK_ADDR']))
-
+                # try to find node by node public key on-chain
                 xbr_node_id = xbr.xbrnetwork.functions.getNodeByKey(self.key.public_key()).call()
-
                 if xbr_node_id != b'\x00' * 16:
-
                     assert (len(xbr_node_id) == 16)
 
+                    # get node domain, type, configuration and license as stored on-chain
                     xbr_node_domain = xbr.xbrnetwork.functions.getNodeDomain(xbr_node_id).call()
                     xbr_node_type = xbr.xbrnetwork.functions.getNodeType(xbr_node_id).call()
                     xbr_node_config = xbr.xbrnetwork.functions.getNodeConfig(xbr_node_id).call()
@@ -461,6 +484,8 @@ class FabricCenterNode(node.FabricNode):
                     self.log.info('Node is registered in the XBR network with license type={license}',
                                   license=self._license.type)
 
+                    # if a (hash of a) configuration is set on-chain for the master node, fetch the
+                    # configuration content for the hash from IPFS
                     if xbr_node_config:
                         if 'IPFS_GATEWAY_URL' in os.environ:
                             ipfs_gateway_url = os.environ['IPFS_GATEWAY_URL']
@@ -509,21 +534,7 @@ class FabricCenterNode(node.FabricNode):
             else:
                 self.log.warn('Could not connect to Ethereum blockchain')
 
-        # allow extending/overriding the node configuration loaded with local config files
-        #
-        if configfile:
-            config_source = self.CONFIG_SOURCE_LOCALFILE
-            config_path = os.path.abspath(os.path.join(self._cbdir, configfile))
-
-            self.log.info('Expanding built-in node configuration from local file {configpath}',
-                          configpath=hlid(config_path))
-            with open(config_path) as f:
-                custom_config = json.load(f)
-                # as an overriding config file does not need to be a fully valid config in itself, do _not_ check it!
-                # self.personality.check_config(self.personality, custom_config)
-            config = merge_config(config, custom_config)
-
-        # check the final, assembled initial node configuration to apply
+        # 4/4: check and set the final merged master node configuration
         #
         self.personality.check_config(self.personality, config)
         self._config = config
@@ -566,7 +577,7 @@ class FabricCenterNode(node.FabricNode):
                                                         personality=self.personality,
                                                         node=self)
         router = self._router_factory.get(self._realm)
-        self._router_session_factory.add(self._bridge_session, router, authrole=u'trusted')
+        self._router_session_factory.add(self._bridge_session, router, authrole='trusted')
         yield extra['ready']
 
     def _add_extra_controller_components(self, controller_options):

@@ -1,11 +1,12 @@
 ##############################################################################
 #
-#                        Crossbar.io FX
+#                        Crossbar.io
 #     Copyright (C) Crossbar.io Technologies GmbH. All rights reserved.
 #
 ##############################################################################
 
 import txaio
+
 txaio.use_twisted()
 
 from crossbar.network._authenticator import Authenticator as XbrNetworkAuthenticator

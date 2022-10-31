@@ -29,7 +29,7 @@ from zope.interface import implementer
 import txtorcon
 
 from crossbar._util import get_free_tcp_port, first_free_tcp_port
-from crossbar.common.twisted.sharedport import SharedPort, SharedTLSPort
+from crossbar.common.twisted.sharedport import CustomTCPPort, CustomTCPTLSPort
 
 try:
     from twisted.internet.endpoints import SSL4ServerEndpoint, \
@@ -38,7 +38,7 @@ try:
     from OpenSSL import crypto
     # from OpenSSL.SSL import OP_NO_SSLv3, OP_NO_TLSv1
     from twisted.internet._sslverify import TLSVersion
-    from twisted.internet.interfaces import ISSLTransport
+    from twisted.internet.interfaces import ISSLTransport  # noqa
 
     _HAS_TLS = True
     _LACKS_TLS_MSG = None
@@ -47,61 +47,7 @@ except ImportError as e:
     _LACKS_TLS_MSG = "{}".format(e)
 
 __all__ = ('create_listening_endpoint_from_config', 'create_listening_port_from_config',
-           'create_connecting_endpoint_from_config', 'create_connecting_port_from_config', 'extract_peer_certificate')
-
-
-def extract_peer_certificate(transport):
-    """
-    Extract TLS x509 client certificate information from a Twisted stream transport.
-    """
-    if not _HAS_TLS:
-        raise Exception("cannot extract certificate - TLS support packages not installed")
-
-    # check if the Twisted transport is a TLSMemoryBIOProtocol
-    if not (hasattr(transport, 'getPeerCertificate') and ISSLTransport.providedBy(transport)):
-        return None
-
-    cert = transport.getPeerCertificate()
-    if cert:
-        # Extract x509 name components from an OpenSSL X509Name object.
-        # pkey = cert.get_pubkey()
-        def maybe_bytes(value):
-            if isinstance(value, bytes):
-                return value.decode('utf8')
-            else:
-                return value
-
-        result = {
-            'md5': '{}'.format(maybe_bytes(cert.digest('md5'))).upper(),
-            'sha1': '{}'.format(maybe_bytes(cert.digest('sha1'))).upper(),
-            'sha256': '{}'.format(maybe_bytes(cert.digest('sha256'))).upper(),
-            'expired': bool(cert.has_expired()),
-            'hash': maybe_bytes(cert.subject_name_hash()),
-            'serial': int(cert.get_serial_number()),
-            'signature_algorithm': maybe_bytes(cert.get_signature_algorithm()),
-            'version': int(cert.get_version()),
-            'not_before': maybe_bytes(cert.get_notBefore()),
-            'not_after': maybe_bytes(cert.get_notAfter()),
-            'extensions': []
-        }
-
-        for i in range(cert.get_extension_count()):
-            ext = cert.get_extension(i)
-            ext_info = {
-                'name': '{}'.format(maybe_bytes(ext.get_short_name())),
-                'value': '{}'.format(maybe_bytes(ext)),
-                'criticial': ext.get_critical() != 0
-            }
-            result['extensions'].append(ext_info)
-
-        for entity, name in [('subject', cert.get_subject()), ('issuer', cert.get_issuer())]:
-            result[entity] = {}
-            for key, value in name.get_components():
-                key = maybe_bytes(key)
-                value = maybe_bytes(value)
-                result[entity]['{}'.format(key).lower()] = '{}'.format(value)
-
-        return result
+           'create_connecting_endpoint_from_config', 'create_connecting_port_from_config')
 
 
 def _create_tls_server_context(config, cbdir, log):
@@ -252,7 +198,7 @@ def _create_tls_server_context(config, cbdir, log):
 
 def _create_tls_client_context(config, cbdir, log):
     """
-    Create a CertificateOptions object for use with TLS listening endpoints.
+    Create a CertificateOptions object for use with TLS connecting endpoints.
     """
     # server hostname: The expected name of the remote host.
     hostname = config['hostname']
@@ -260,16 +206,16 @@ def _create_tls_client_context(config, cbdir, log):
     # explicit trust (certificate) root
     ca_certs = None
     if 'ca_certificates' in config:
-        log.info("TLS client using explicit trust ({cnt_certs} certificates)",
-                 cnt_certs=len(config['ca_certificates']))
+        log.debug("TLS client using explicit trust ({cnt_certs} certificates)",
+                  cnt_certs=len(config['ca_certificates']))
         ca_certs = []
         for cert_fname in [os.path.abspath(os.path.join(cbdir, x)) for x in (config['ca_certificates'])]:
             cert = crypto.load_certificate(crypto.FILETYPE_PEM, open(cert_fname, 'rb').read())
-            log.info("TLS client trust root CA certificate loaded from '{fname}'", fname=cert_fname)
+            log.debug("TLS client trust root CA certificate loaded from '{fname}'", fname=cert_fname)
             ca_certs.append(cert)
         ca_certs = OpenSSLCertificateAuthorities(ca_certs)
     else:
-        log.info("TLS client using platform trust")
+        log.debug("TLS client using platform trust")
 
     # client key/cert to use
     client_cert = None
@@ -280,15 +226,15 @@ def _create_tls_client_context(config, cbdir, log):
         key_fname = os.path.abspath(os.path.join(cbdir, config['key']))
         with open(key_fname, 'r') as f:
             private_key = KeyPair.load(f.read(), format=crypto.FILETYPE_PEM)
-            log.info("Loaded client TLS key from '{key_fname}'", key_fname=key_fname)
+            log.debug("Loaded client TLS key from '{key_fname}'", key_fname=key_fname)
 
         cert_fname = os.path.abspath(os.path.join(cbdir, config['certificate']))
         with open(cert_fname, 'r') as f:
             cert = Certificate.loadPEM(f.read(), )
-            log.info("Loaded client TLS certificate from '{cert_fname}' (cn='{cert_cn}', sha256={cert_sha256}..)",
-                     cert_fname=cert_fname,
-                     cert_cn=cert.getSubject().CN,
-                     cert_sha256=cert.digest('sha256')[:12])
+            log.debug("Loaded client TLS certificate from '{cert_fname}' (cn='{cert_cn}', sha256={cert_sha256}..)",
+                      cert_fname=cert_fname,
+                      cert_cn=cert.getSubject().CN,
+                      cert_sha256=cert.digest('sha256')[:12])
 
         client_cert = PrivateCertificate.fromCertificateAndKeyPair(cert, private_key)
     else:
@@ -491,7 +437,15 @@ def create_listening_port_from_config(config, cbdir, factory, reactor, log):
             # random free port
             config['port'] = get_free_tcp_port(host=config.get('interface', ''))
 
-    if config['type'] == 'tcp' and config.get('shared', False):
+    # the TCP socket sharing option
+    #
+    shared = config.get('shared', False)
+
+    # the TCP socket user timeout option
+    #
+    user_timeout = config.get('user_timeout', None)
+
+    if config['type'] == 'tcp' and (shared or user_timeout is not None):
 
         # the TCP protocol version (v4 or v6)
         #
@@ -509,10 +463,6 @@ def create_listening_port_from_config(config, cbdir, factory, reactor, log):
         #
         backlog = int(config.get('backlog', 50))
 
-        # the TCP socket sharing option
-        #
-        shared = config.get('shared', False)
-
         # create a listening port
         #
         if 'tls' in config:
@@ -521,7 +471,14 @@ def create_listening_port_from_config(config, cbdir, factory, reactor, log):
                 context = _create_tls_server_context(config['tls'], cbdir, log)
 
                 if version == 4:
-                    listening_port = SharedTLSPort(port, factory, context, backlog, interface, reactor, shared=shared)
+                    listening_port = CustomTCPTLSPort(port,
+                                                      factory,
+                                                      context,
+                                                      backlog,
+                                                      interface,
+                                                      reactor,
+                                                      shared=shared,
+                                                      user_timeout=user_timeout)
                 elif version == 6:
                     raise Exception("TLS on IPv6 not implemented")
                 else:
@@ -529,7 +486,13 @@ def create_listening_port_from_config(config, cbdir, factory, reactor, log):
             else:
                 raise Exception("TLS transport requested, but TLS packages not available:\n{}".format(_LACKS_TLS_MSG))
         else:
-            listening_port = SharedPort(port, factory, backlog, interface, reactor, shared=shared)
+            listening_port = CustomTCPPort(port,
+                                           factory,
+                                           backlog,
+                                           interface,
+                                           reactor,
+                                           shared=shared,
+                                           user_timeout=user_timeout)
 
         try:
             listening_port.startListening()

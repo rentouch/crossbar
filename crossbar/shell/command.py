@@ -1,7 +1,7 @@
 ###############################################################################
 #
 # Crossbar.io Shell
-# Copyright (c) Crossbar.io Technologies GmbH. All rights reserved.
+# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -184,18 +184,18 @@ class CmdAddPrincipal(CmdAdd):
             arealm = await session.call('crossbarfabriccenter.mrealm.arealm.get_arealm_by_name', self.arealm)
             arealm_oid = arealm['oid']
 
-        role = self.config.get('authrole', None)
+        role = self.config.get('role', None)
         assert role is not None and type(role) == str
+
         try:
-            role_oid_ = uuid.UUID(role)
+            role_oid = uuid.UUID(role)
+            role_obj = await session.call('crossbarfabriccenter.mrealm.arealm.get_role', role_oid)
         except:
             role_obj = await session.call('crossbarfabriccenter.mrealm.arealm.get_role_by_name', role)
             role_oid = role_obj['oid']
-        else:
-            role_oid = str(role_oid_)
 
         config = copy.deepcopy(self.config)
-        del config['authrole']
+        del config['role']
         config['role_oid'] = role_oid
 
         try:
@@ -635,6 +635,129 @@ class CmdRemoveWebClusterNode(CmdRemove):
         return self._post(session, result)
 
 
+class CmdRemoveArealmPrincipal(CmdRemove):
+    def __init__(self, arealm, principal):
+        CmdRemove.__init__(self)
+        self.arealm = arealm
+        self.principal = principal
+
+    async def run(self, session):
+        self._pre(session)
+
+        try:
+            arealm_oid = uuid.UUID(self.arealm)
+        except:
+            arealm = await session.call('crossbarfabriccenter.mrealm.arealm.get_arealm_by_name', self.arealm)
+            arealm_oid = arealm['oid']
+        else:
+            arealm_oid = str(arealm_oid)
+
+        try:
+            principal_oid = uuid.UUID(self.principal)
+        except:
+            principal = await session.call('crossbarfabriccenter.mrealm.arealm.get_principal_by_name', self.arealm)
+            principal_oid = principal['oid']
+        else:
+            principal_oid = str(principal_oid)
+
+        result = await session.call('crossbarfabriccenter.mrealm.arealm.remove_principal', arealm_oid, principal_oid)
+
+        return self._post(session, result)
+
+
+class CmdRemoveArealmPrincipalCredential(CmdRemove):
+    def __init__(self, arealm, principal, credential):
+        CmdRemove.__init__(self)
+        self.arealm = arealm
+        self.principal = principal
+        self.credential = credential
+
+    async def run(self, session):
+        self._pre(session)
+
+        try:
+            arealm_oid = uuid.UUID(self.arealm)
+        except:
+            arealm = await session.call('crossbarfabriccenter.mrealm.arealm.get_arealm_by_name', self.arealm)
+            arealm_oid = arealm['oid']
+        else:
+            arealm_oid = str(arealm_oid)
+
+        try:
+            principal_oid = uuid.UUID(self.principal)
+        except:
+            principal = await session.call('crossbarfabriccenter.mrealm.arealm.get_principal_by_name', self.arealm)
+            principal_oid = principal['oid']
+        else:
+            principal_oid = str(principal_oid)
+
+        credential_oid = uuid.UUID(self.credential)
+
+        result = await session.call('crossbarfabriccenter.mrealm.arealm.remove_principal_credential', arealm_oid,
+                                    principal_oid, credential_oid)
+
+        return self._post(session, result)
+
+
+class CmdRemoveRolePermission(CmdRemove):
+    def __init__(self, role, path):
+        CmdRemove.__init__(self)
+        self.role = role
+        self.path = path
+
+    async def run(self, session):
+        self._pre(session)
+
+        try:
+            role_oid = uuid.UUID(self.role)
+        except:
+            role = await session.call('crossbarfabriccenter.mrealm.arealm.get_role_by_name', self.role)
+            role_oid = role['oid']
+        else:
+            role_oid = str(role_oid)
+
+        permission_oids = await session.call('crossbarfabriccenter.mrealm.arealm.get_role_permissions_by_uri',
+                                             role_oid, self.path)
+
+        results = []
+        for permission_oid in permission_oids:
+            result = await session.call('crossbarfabriccenter.mrealm.arealm.remove_role_permission', role_oid,
+                                        permission_oid)
+            results.append(result)
+
+        return self._post(session, result)
+
+
+class CmdRemoveArealmRole(CmdRemove):
+    def __init__(self, arealm, role):
+        CmdRemove.__init__(self)
+        self.arealm = arealm
+        self.role = role
+
+    async def run(self, session):
+        self._pre(session)
+
+        try:
+            arealm_oid = uuid.UUID(self.arealm)
+        except:
+            arealm = await session.call('crossbarfabriccenter.mrealm.arealm.get_arealm_by_name', self.arealm)
+            arealm_oid = arealm['oid']
+        else:
+            arealm_oid = str(arealm_oid)
+
+        try:
+            role_oid = uuid.UUID(self.role)
+        except:
+            role = await session.call('crossbarfabriccenter.mrealm.arealm.get_role_by_name', self.role)
+            role_oid = role['oid']
+        else:
+            role_oid = str(role_oid)
+
+        result = await session.call('crossbarfabriccenter.mrealm.arealm.remove_arealm_role', arealm_oid, role_oid)
+
+        return self._post(session, result)
+
+
 class CmdDelete(Cmd):
     def __init__(self):
         Cmd.__init__(self)
@@ -651,6 +774,47 @@ class CmdDeleteManagementRealm(CmdDelete):
         result = await session.call('crossbarfabriccenter.mrealm.delete_mrealm_by_name',
                                     self.realm,
                                     cascade=self.cascade)
+        return self._post(session, result)
+
+
+class CmdDeleteApplicationRealm(CmdDelete):
+    def __init__(self, realm, cascade):
+        CmdDelete.__init__(self)
+        self.realm = realm
+        self.cascade = cascade
+
+    async def run(self, session):
+        self._pre(session)
+
+        try:
+            arealm_oid = uuid.UUID(self.realm)
+        except:
+            arealm = await session.call('crossbarfabriccenter.mrealm.arealm.get_arealm_by_name', self.realm)
+            arealm_oid = arealm['oid']
+        else:
+            arealm_oid = str(arealm_oid)
+
+        result = await session.call('crossbarfabriccenter.mrealm.arealm.delete_arealm', arealm_oid)
+        return self._post(session, result)
+
+
+class CmdDeleteRole(CmdDelete):
+    def __init__(self, role):
+        CmdDelete.__init__(self)
+        self.role = role
+
+    async def run(self, session):
+        self._pre(session)
+
+        try:
+            role_oid = uuid.UUID(self.role)
+        except:
+            role = await session.call('crossbarfabriccenter.mrealm.arealm.get_role_by_name', self.role)
+            role_oid = role['oid']
+        else:
+            role_oid = str(role_oid)
+
+        result = await session.call('crossbarfabriccenter.mrealm.arealm.delete_role', role_oid)
         return self._post(session, result)
 
 
@@ -773,7 +937,7 @@ class CmdListRouterTransports(CmdList):
         return self._post(session, result)
 
 
-class CmdListApplicationRealms(CmdList):
+class CmdListARealms(CmdList):
     """
     MREALM: Get list of application realms defined on a mrealm.
     """
@@ -788,9 +952,9 @@ class CmdListApplicationRealms(CmdList):
         return self._post(session, result)
 
 
-class CmdListRoles(CmdList):
+class CmdListARealmRoles(CmdList):
     """
-    MREALM: Get list of roles defined on a mrealm.
+    MREALM: Get list of roles associated with the given application realm defined on a mrealm.
     """
     def __init__(self, arealm, names=False):
         CmdList.__init__(self)
@@ -808,9 +972,47 @@ class CmdListRoles(CmdList):
         else:
             arealm_oid = str(arealm_oid)
 
-        result = await session.call('crossbarfabriccenter.mrealm.arealm.list_roles',
+        result = await session.call('crossbarfabriccenter.mrealm.arealm.list_arealm_roles',
                                     arealm_oid,
                                     return_names=self.names)
+        return self._post(session, result)
+
+
+class CmdListRoles(CmdList):
+    """
+    MREALM: Get list of roles defined on a mrealm.
+    """
+    def __init__(self, names=False):
+        CmdList.__init__(self)
+        self.names = names
+
+    async def run(self, session):
+        self._pre(session)
+
+        result = await session.call('crossbarfabriccenter.mrealm.arealm.list_roles', return_names=self.names)
+        return self._post(session, result)
+
+
+class CmdListRolePermissions(CmdList):
+    """
+    MREALM: Get list of permissions defined for a role.
+    """
+    def __init__(self, role):
+        CmdList.__init__(self)
+        self.role = role
+
+    async def run(self, session):
+        self._pre(session)
+
+        try:
+            role_oid = uuid.UUID(self.role)
+        except:
+            role = await session.call('crossbarfabriccenter.mrealm.arealm.get_role_by_name', self.role)
+            role_oid = role['oid']
+        else:
+            role_oid = str(role_oid)
+
+        result = await session.call('crossbarfabriccenter.mrealm.arealm.list_role_permissions', role_oid)
         return self._post(session, result)
 
 
@@ -1305,7 +1507,33 @@ class CmdShowRole(CmdShow):
         return self._post(session, result)
 
 
-class CmdShowApplicationRealmRole(CmdShow):
+class CmdShowRolePermission(CmdShow):
+    """
+    MREALM: show role permission by role UUID or name, and optionally URI
+    """
+    def __init__(self, role, uri):
+        CmdShow.__init__(self)
+        self.role = role
+        self.uri = uri
+
+    async def run(self, session):
+        self._pre(session)
+
+        try:
+            role_oid = uuid.UUID(self.role)
+        except:
+            role = await session.call('crossbarfabriccenter.mrealm.arealm.get_role_by_name', self.role)
+            role_oid = role['oid']
+        else:
+            role_oid = str(role_oid)
+
+        result = await session.call('crossbarfabriccenter.mrealm.arealm.get_role_permissions_by_uri', role_oid,
+                                    self.uri)
+
+        return self._post(session, result)
+
+
+class CmdShowARealmRole(CmdShow):
     """
     MREALM: show application realm role association.
     """

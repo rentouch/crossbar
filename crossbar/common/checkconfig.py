@@ -15,11 +15,12 @@ from pprint import pformat
 from pygments import highlight, lexers, formatters
 
 import txaio
+
 txaio.use_twisted()
 
 from autobahn.websocket.util import parse_url
-from autobahn.wamp.message import _URI_PAT_STRICT_NON_EMPTY
-from autobahn.wamp.message import _URI_PAT_STRICT_LAST_EMPTY
+from autobahn.wamp.message import _URI_PAT_STRICT_NON_EMPTY, _URI_PAT_STRICT_LAST_EMPTY, \
+    _URI_PAT_REALM_NAME, _URI_PAT_LOOSE_EMPTY, identity_realm_name_category
 from autobahn.wamp.uri import convert_starred_uri
 
 from yaml import Loader, SafeLoader, Dumper, SafeDumper
@@ -28,7 +29,7 @@ from yaml.constructor import ConstructorError
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence, Hashable
 
-__all__ = ('check_config', 'check_config_file', 'convert_config_file', 'check_guest')
+__all__ = ('check_dict_args', 'check_config', 'check_config_file', 'convert_config_file', 'check_guest')
 
 LATEST_CONFIG_VERSION = 2
 """
@@ -82,9 +83,6 @@ _ENVPAT = re.compile(_ENVPAT_STR)
 
 _CONFIG_ITEM_ID_PAT_STR = r'^[a-z][a-z0-9_]{2,63}$'
 _CONFIG_ITEM_ID_PAT = re.compile(_CONFIG_ITEM_ID_PAT_STR)
-
-_REALM_NAME_PAT_STR = r'^[A-Za-z][A-Za-z0-9_\-@\.]{2,254}$'
-_REALM_NAME_PAT = re.compile(_REALM_NAME_PAT_STR)
 
 log = txaio.make_logger()
 
@@ -311,9 +309,9 @@ def check_realm_name(name):
     """
     if not isinstance(name, str):
         raise InvalidConfigException('invalid realm name "{}" - type must be string, was {}'.format(name, type(name)))
-    if not _REALM_NAME_PAT.match(name):
+    if not _URI_PAT_REALM_NAME.match(name):
         raise InvalidConfigException('invalid realm name "{}" - must match regular expression {}'.format(
-            name, _REALM_NAME_PAT_STR))
+            name, _URI_PAT_REALM_NAME.pattern))
 
 
 def check_dict_args(spec, config, msg):
@@ -520,23 +518,69 @@ def check_transport_auth_cryptosign(config):
         ))
 
     if config['type'] == 'static':
-        if 'principals' not in config:
+        if 'principals' in config and 'trustroots' in config:
+            raise InvalidConfigException("cannot specify both 'principals' and 'trustroots' attributes "
+                                         "(only one is allowed) in static WAMP-Cryptosign configuration")
+
+        if 'principals' in config:
+            if not isinstance(config['principals'], Mapping):
+                raise InvalidConfigException(
+                    "invalid type for attribute 'principals' in static WAMP-Cryptosign configuration - expected dict, got {}"
+                    .format(type(config['principals'])))
+            for authid, principal in config['principals'].items():
+                check_dict_args(
+                    {
+                        'authorized_keys': (True, [Sequence]),
+                        'role': (False, [str]),
+                        'realm': (False, [str]),
+                    }, principal, "WAMP-Cryptosign - principal '{}' configuration".format(authid))
+                for pubkey in principal['authorized_keys']:
+                    if not isinstance(pubkey, str):
+                        raise InvalidConfigException("invalid type {} for pubkey "
+                                                     "in authorized_keys of principal".format(type(pubkey)))
+
+        elif 'trustroots' in config:
+            if not isinstance(config['trustroots'], Mapping):
+                raise InvalidConfigException(
+                    "invalid type for attribute 'trustroots' in static WAMP-Cryptosign configuration - expected dict, got {}"
+                    .format(type(config['trustroots'])))
+            for realm, trustroot_config in config['trustroots'].items():
+                if not isinstance(realm, str):
+                    raise InvalidConfigException('invalid type for "realm" key in static WAMP-Cryptosign '
+                                                 'configuration - expected realm, got {}'.format(type(realm)))
+
+                if not isinstance(trustroot_config, Mapping):
+                    raise InvalidConfigException(
+                        "invalid type for attribute 'trustroot' in static WAMP-Cryptosign configuration - expected dict, got {}"
+                        .format(type(trustroot_config)))
+
+                check_dict_args(
+                    {
+                        'certificate': (False, [str]),
+                        'trustroot': (False, [str]),
+                        'role': (False, [str]),
+                        'realm': (False, [str]),
+                    }, trustroot_config,
+                    "WAMP-Cryptosign - trustroot_config '{}' configuration".format(trustroot_config))
+
+                if 'certificate' in trustroot_config:
+                    certificate = trustroot_config['certificate']
+                    if not isinstance(certificate, str):
+                        raise InvalidConfigException('invalid type for "certificate" key in static WAMP-Cryptosign '
+                                                     'configuration - expected string, got {}'.format(
+                                                         type(certificate)))
+                elif 'trustroot':
+                    trustroot = trustroot_config['trustroot']
+                    name_category = identity_realm_name_category(trustroot)
+                    if name_category not in ['eth', 'ens', 'reverse_ens']:
+                        raise InvalidConfigException(
+                            'invalid value for "trustroot" key in static WAMP-Cryptosign '
+                            'configuration - expected an Ethereum address, ENS name or reverse '
+                            'ENS name, got "{}"'.format(trustroot))
+        else:
             raise InvalidConfigException(
-                "missing mandatory attribute 'principals' in static WAMP-Cryptosign configuration")
-        if not isinstance(config['principals'], Mapping):
-            raise InvalidConfigException(
-                "invalid type for attribute 'principals' in static WAMP-Cryptosign configuration - expected dict, got {}"
-                .format(type(config['principals'])))
-        for authid, principal in config['principals'].items():
-            check_dict_args({
-                'authorized_keys': (True, [Sequence]),
-                'role': (False, [str]),
-                'realm': (False, [str]),
-            }, principal, "WAMP-Cryptosign - principal '{}' configuration".format(authid))
-            for pubkey in principal['authorized_keys']:
-                if not isinstance(pubkey, str):
-                    raise InvalidConfigException("invalid type {} for pubkey in authorized_keys of principal".format(
-                        type(pubkey)))
+                "missing mandatory attribute: neither 'principals' nor 'trustroots' attribute "
+                "found in static WAMP-Cryptosign configuration")
 
     elif config['type'] == 'dynamic':
         if 'authenticator' not in config:
@@ -636,11 +680,13 @@ def check_transport_auth_anonymous(config):
             format(config['type']))
 
     if config['type'] == 'static':
-        check_dict_args({
-            'type': (True, [str]),
-            'role': (False, [str]),
-            'authid': (False, [str]),
-        }, config, "WAMP-Anonymous configuration")
+        check_dict_args(
+            {
+                'type': (True, [str]),
+                'realm': (False, [str]),
+                'role': (False, [str]),
+                'authid': (False, [str]),
+            }, config, "WAMP-Anonymous configuration")
 
     elif config['type'] == 'dynamic':
         if 'authenticator' not in config:
@@ -666,13 +712,11 @@ def check_transport_auth(personality, auth, ignore=[], checks=None):
             type(auth)))
     CHECKS = checks or {
         'anonymous': check_transport_auth_anonymous,
-        'anonymous-proxy': check_transport_auth_anonymous,
         'ticket': check_transport_auth_ticket,
         'wampcra': check_transport_auth_wampcra,
         'tls': check_transport_auth_tls,
         'cookie': check_transport_auth_cookie,
         'cryptosign': check_transport_auth_cryptosign,
-        'cryptosign-proxy': check_transport_auth_cryptosign,
         'scram': check_transport_auth_scram,
 
         # FIXME: these are actually not the same as corresponding non-proxied configuration items
@@ -706,9 +750,34 @@ def check_cookie_store_file(store):
     """
     check_dict_args({
         'type': (True, [str]),
-        'filename': (False, [str]),
+        'filename': (True, [str]),
         'purge_on_startup': (False, [bool])
-    }, store, "WebSocket memory-backed cookie store configuration")
+    }, store, "WebSocket file-backed cookie store configuration")
+
+
+def check_cookie_store_database(store):
+    """
+    Checking database-backed cookie store configuration.
+
+    .. code-block:: json
+
+        "store": {
+            "type": "database",
+            "path": ".cookies",
+            "maxsize": 1048576,
+            "readonly": false,
+            "sync": true
+        }
+    """
+    check_dict_args(
+        {
+            'type': (True, [str]),
+            'path': (True, [str]),
+            'purge_on_startup': (False, [bool]),
+            'maxsize': (False, [int]),
+            'readonly': (False, [bool]),
+            'sync': (False, [bool]),
+        }, store, "WebSocket database-backed cookie store configuration")
 
 
 def check_transport_cookie(personality, cookie, ignore=[]):
@@ -754,7 +823,7 @@ def check_transport_cookie(personality, cookie, ignore=[]):
                 "missing mandatory attribute 'type' in cookie store configuration\n\n{}".format(pformat(cookie)))
 
         store_type = store['type']
-        if store_type not in ['memory', 'file'] + ignore:
+        if store_type not in ['memory', 'file', 'database'] + ignore:
             raise InvalidConfigException(
                 "invalid attribute value '{}' for attribute 'type' in cookie store item\n\n{}".format(
                     store_type, pformat(cookie)))
@@ -763,6 +832,8 @@ def check_transport_cookie(personality, cookie, ignore=[]):
             check_cookie_store_memory(store)
         elif store_type == 'file':
             check_cookie_store_file(store)
+        elif store_type == 'database':
+            check_cookie_store_database(store)
         elif store_type in ignore:
             pass
         else:
@@ -911,7 +982,7 @@ def check_listening_endpoint_tcp(endpoint):
     :type endpoint: dict
     """
     for k in endpoint:
-        if k not in ['type', 'version', 'port', 'portrange', 'shared', 'interface', 'backlog', 'tls']:
+        if k not in ['type', 'version', 'port', 'portrange', 'shared', 'interface', 'backlog', 'tls', 'user_timeout']:
             raise InvalidConfigException("encountered unknown attribute '{}' in listening endpoint".format(k))
 
     if 'portrange' in endpoint:
@@ -962,6 +1033,15 @@ def check_listening_endpoint_tcp(endpoint):
 
     if 'backlog' in endpoint:
         check_endpoint_backlog(endpoint['backlog'])
+
+    if 'user_timeout' in endpoint:
+        user_timeout = endpoint['user_timeout']
+        if not isinstance(user_timeout, int):
+            raise InvalidConfigException(
+                "'user_timeout' attribute in endpoint must be integer ({} encountered)".format(type(user_timeout)))
+        if user_timeout < 0 or user_timeout > 65535:
+            raise InvalidConfigException(
+                "invalid value {} for 'user_timeout' attribute in endpoint".format(user_timeout))
 
 
 def check_listening_endpoint_unix(endpoint):
@@ -1304,6 +1384,7 @@ def check_websocket_options(options):
                 'auto_ping_interval',
                 'auto_ping_timeout',
                 'auto_ping_size',
+                'auto_ping_restart_on_any_traffic',
                 'enable_flash_policy',
                 'flash_policy',
                 'compression',
@@ -1335,6 +1416,7 @@ def check_websocket_options(options):
             'auto_ping_interval': (False, [int]),
             'auto_ping_timeout': (False, [int]),
             'auto_ping_size': (False, [int]),
+            'auto_ping_restart_on_any_traffic': (False, [bool]),
             'enable_flash_policy': (False, [bool]),
             'flash_policy': (False, []),  # FIXME not in docs
             'compression': (False, [Mapping]),
@@ -1347,8 +1429,8 @@ def check_websocket_options(options):
 
     if 'auto_ping_size' in options:
         aps = int(options['auto_ping_size'])
-        if aps < 4 or aps > 125:
-            raise InvalidConfigException("WebSocket option 'auto_ping_size' must be between 4 and 125")
+        if aps < 12 or aps > 125:
+            raise InvalidConfigException("WebSocket option 'auto_ping_size' must be between 12 and 125")
 
     millisecond_intervals = [
         'open_handshake_timeout',
@@ -2061,11 +2143,13 @@ def check_listening_transport_mqtt(personality, transport, with_endpoint=True):
 
     # Check MQTT options...
     options = transport.get('options', {})
-    check_dict_args({
-        'realm': (True, [str]),
-        'role': (False, [str]),
-        'payload_mapping': (False, [Mapping]),
-    }, options, "invalid MQTT options")
+    check_dict_args(
+        {
+            'realm': (True, [str]),
+            'role': (False, [str]),
+            'payload_mapping': (False, [Mapping]),
+            'auth': (False, [Mapping]),
+        }, options, "invalid MQTT options")
 
     check_realm_name(options['realm'])
 
@@ -2610,22 +2694,33 @@ def check_router_component(personality, component, ignore=[]):
             {
                 'id': (False, [str]),
                 'type': (True, [str]),
+                # we MUST have a realm to embed the session in the right router realm
                 'realm': (True, [str]),
+                # we MAY be given an explicit role to embed the session under (since this is trusted setup anyways)
                 'role': (False, [str]),
                 'references': (False, [Sequence]),
                 'classname': (True, [str]),
+                # any user extra configuration to forward
                 'extra': (False, None),
-            }, component, "invalid component configuration")
+            },
+            component,
+            "invalid component configuration")
 
     elif ctype == 'function':
         check_dict_args(
             {
                 'id': (False, [str]),
                 'type': (True, [str]),
+                # we MUST have a realm to embed the session in the right router realm
                 'realm': (True, [str]),
+                # we MAY be given an explicit role to embed the session under (since this is trusted setup anyways)
                 'role': (False, [str]),
                 'callbacks': (False, [dict]),
-            }, component, "invalid component configuration")
+                # any user extra configuration to forward
+                'extra': (False, None),
+            },
+            component,
+            "invalid component configuration")
         if 'callbacks' in component:
             valid_callbacks = ['join', 'leave', 'connect', 'disconnect']
             for name in component['callbacks'].keys():
@@ -2696,23 +2791,37 @@ def check_container_component(personality, component, ignore=[]):
             {
                 'id': (False, [str]),
                 'type': (True, [str]),
+                # we MUST be given a realm for the container to know where to join
                 'realm': (True, [str]),
+                # the role is assigned via WAMP-authentication!
+                # 'role': (False, [str]),
+                # the transport to the local (or remote) router worker
                 'transport': (True, [Mapping]),
                 'classname': (True, [str]),
+                # any user extra configuration to forward
                 'extra': (False, None),
-            }, component, "invalid component configuration")
+            },
+            component,
+            "invalid component configuration")
 
     elif ctype == 'function':
         check_dict_args(
             {
                 'id': (False, [str]),
                 'type': (True, [str]),
+                # we MUST be given a realm for the container to know where to join
                 'realm': (True, [str]),
+                # the role is assigned via WAMP-authentication!
+                # 'role': (False, [str]),
+                # the transport to the local (or remote) router worker
                 'transport': (True, [Mapping]),
                 'auth': (True, [Mapping]),
-                'role': (False, [str]),
                 'callbacks': (False, [dict]),
-            }, component, "invalid component configuration")
+                # any user extra configuration to forward
+                'extra': (False, None),
+            },
+            component,
+            "invalid component configuration")
         if 'callbacks' in component:
             valid_callbacks = ['join', 'leave', 'connect', 'disconnect']
             for name in component['callbacks'].keys():
@@ -2811,6 +2920,9 @@ def check_router_realm_role(personality, role):
             role_uri = role['uri']
             if not isinstance(role_uri, str):
                 raise InvalidConfigException("'uri' must be a string")
+            if not _URI_PAT_LOOSE_EMPTY.match(role_uri):
+                raise InvalidConfigException('invalid uri "{}" - must match regular expression {}'.format(
+                    role_uri, _URI_PAT_LOOSE_EMPTY.pattern))
 
             if role_uri.endswith('*'):
                 role_uri = role_uri[:-1]
@@ -2821,6 +2933,7 @@ def check_router_realm_role(personality, role):
                     'match': (False, [str]),
                     'allow': (False, [Mapping]),
                     'disclose': (False, [Mapping]),
+                    'validate': (False, [Mapping]),
                     'cache': (False, [bool]),
                 }, role, "invalid grant in role permissions")
 
@@ -2829,9 +2942,10 @@ def check_router_realm_role(personality, role):
                     raise InvalidConfigException("invalid value '{}' for 'match' attribute in role permissions".format(
                         role['match']))
 
-            if not _URI_PAT_STRICT_LAST_EMPTY.match(role_uri):
+            # FIXME
+            if False and not _URI_PAT_STRICT_LAST_EMPTY.match(role_uri):
                 if role.get('match', None) != 'wildcard':
-                    raise InvalidConfigException("invalid role URI '{}' in role permissions".format(role['uri']), )
+                    raise InvalidConfigException("invalid URI '{}' in role permissions".format(role['uri']), )
 
             if 'allow' in role:
                 check_dict_args(
@@ -2847,6 +2961,25 @@ def check_router_realm_role(personality, role):
                     'caller': (False, [bool]),
                     'publisher': (False, [bool]),
                 }, role['disclose'], "invalid disclose in role permissions")
+
+            if 'validate' in role:
+                check_dict_args(
+                    {
+                        # each value is the (fully qualified) name of a validation type in
+                        # the type inventory of this realm, e.g. "uint160_t" or "trading.Period"
+                        'call': (False, [str]),
+                        'call_progress': (False, [str]),
+                        'call_result': (False, [str]),
+                        'call_result_progress': (False, [str]),
+                        'call_error': (False, [str]),
+                        'event': (False, [str]),
+                        'event_confirmation': (False, [str]),
+
+                        # must be a Dict[str, str]
+                        'extra': (False, [Mapping]),
+                    },
+                    role['validate'],
+                    "invalid validate in role permissions")
 
 
 def check_router_components(personality, components):
@@ -3383,7 +3516,7 @@ def check_controller(personality, controller, ignore=[]):
             type(controller), pformat(controller)))
 
     for k in controller:
-        if k not in ['id', 'options', 'manhole', 'connections'] + ignore:
+        if k not in ['id', 'options', 'manhole', 'connections', 'keyring'] + ignore:
             raise InvalidConfigException("encountered unknown attribute '{}' in controller configuration".format(k))
 
     if 'id' in controller:
@@ -3394,6 +3527,33 @@ def check_controller(personality, controller, ignore=[]):
 
     if 'manhole' in controller:
         personality.check_manhole(personality, controller['manhole'])
+
+    if 'keyring' in controller:
+        personality.check_node_key(personality, controller['keyring'])
+
+
+def check_node_key(personality, config):
+    if not isinstance(config, Mapping):
+        raise InvalidConfigException(
+            "controller keyring configuration item must be a dictionary ({} encountered)".format(type(config)))
+
+    if 'type' not in config:
+        raise InvalidConfigException("missing attribute 'type' in controller keyring configuration")
+
+    type_ = config.get("type", None)
+    if type_ == "file":
+        for k in config:
+            if k not in ['type', 'path']:
+                raise InvalidConfigException(
+                    "encountered unknown attribute '{}' in controller keyring configuration".format(k))
+    elif type_ == "hsm":
+        for k in config:
+            if k not in ['type', 'driver', 'port']:
+                raise InvalidConfigException(
+                    "encountered unknown attribute '{}' in controller keyring configuration".format(k))
+    else:
+        raise InvalidConfigException("encountered unknown 'type' in controller keyring configuration. "
+                                     "Only 'file' and 'hsm' are supported")
 
 
 def check_config(personality, config):
@@ -3498,7 +3658,7 @@ def convert_config_file(personality, configfile):
             else:
                 newconfig = os.path.abspath(configbase + '.json')
                 with open(newconfig, 'w') as outfile:
-                    json.dump(config, outfile, ensure_ascii=False, separators=(',', ': '), indent=3, sort_keys=True)
+                    json.dump(config, outfile, ensure_ascii=False, separators=(',', ': '), indent=3, sort_keys=False)
                     log.info("ok, JSON formatted configuration written to {cfg}", cfg=newconfig)
         elif configext == ".json":
             log.info("converting JSON formatted configuration {cfg} to YAML format ...", cfg=configfile)

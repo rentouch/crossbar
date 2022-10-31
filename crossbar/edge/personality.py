@@ -1,13 +1,12 @@
 ##############################################################################
 #
-#                        Crossbar.io FX
+#                        Crossbar.io
 #     Copyright (C) Crossbar.io Technologies GmbH. All rights reserved.
 #
 ##############################################################################
 
-import time
 from typing import Dict
-from collections import Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pprint import pformat
 
 import six
@@ -19,9 +18,8 @@ from crossbar.common import checkconfig
 from crossbar.node.node import NodeOptions
 from crossbar.node.worker import RouterWorkerProcess
 
-import crossbar
 from crossbar.edge.node.node import FabricNode
-from crossbar.edge.worker.realmstore import CfxDbRealmStore
+from crossbar.edge.worker.realmstore import RealmStoreDatabase
 from crossbar.edge.worker.router import ExtRouterController
 from crossbar.edge.worker.hostmonitor import HostMonitor, HostMonitorProcess
 from crossbar.edge.worker.xbrmm import MarketplaceController, MarketplaceControllerProcess
@@ -59,8 +57,8 @@ def check_blockchain(personality, blockchain):
     #     "gateway": {
     #         "type": "infura",
     #         "network": "ropsten",
-    #         "key": "00000000000000000000000000000000",
-    #         "secret": "00000000000000000000000000000000"
+    #         "key": "${INFURA_PROJECT_ID}",
+    #         "secret": "${INFURA_PROJECT_SECRET}"
     #     },
     #     "from_block": 6350652,
     #     "chain_id": 3
@@ -149,7 +147,7 @@ def check_database(personality, database):
 def check_controller_fabric(personality, fabric):
     """
     Check controller Fabric configuration override (which essentially is only
-    for debugging purposes or for people running Crossbar.io FX Service on-premise)
+    for debugging purposes or for people running Crossbar.io Service on-premise)
 
     :param fabric: The Fabric configuration to check.
     :type fabric: dict
@@ -308,8 +306,8 @@ _native_workers.update({
         'checkconfig_options': checkconfig.check_router_options,
         'logname': 'Router',
         'topics': {
-            'starting': u'crossbar.on_router_starting',
-            'started': u'crossbar.on_router_started',
+            'starting': 'crossbar.on_router_starting',
+            'started': 'crossbar.on_router_started',
         }
     }
 })
@@ -325,10 +323,10 @@ _native_workers.update({
         'checkconfig_item': do_nothing,
         # FIXME: only check hostmonitor worker options
         'checkconfig_options': check_hostmonitor_options,
-        'logname': u'Hostmonitor',
+        'logname': 'Hostmonitor',
         'topics': {
-            'starting': u'crossbar.on_hostmonitor_starting',
-            'started': u'crossbar.on_hostmonitor_started',
+            'starting': 'crossbar.on_hostmonitor_starting',
+            'started': 'crossbar.on_hostmonitor_started',
         }
     }
 })
@@ -341,31 +339,13 @@ _native_workers.update({
         'worker_class': MarketplaceController,
         'checkconfig_item': check_markets_worker,
         'checkconfig_options': check_markets_worker_options,
-        'logname': u'XBRMM',
+        'logname': 'XBRMM',
         'topics': {
-            'starting': u'crossbar.on_xbrmm_starting',
-            'started': u'crossbar.on_xbrmm_started',
+            'starting': 'crossbar.on_xbrmm_starting',
+            'started': 'crossbar.on_xbrmm_started',
         }
     }
 })
-
-_TITLE = "Crossbar.io FX"
-
-# sudo apt install figlet && figlet -f smslant "Crossbar FX"
-_BANNER = r"""
-    :::::::::::::::::
-          :::::          _____                 __              _____  __
-    :::::   :   :::::   / ___/______  ___ ___ / /  ___ _____  / __/ |/_/
-    :::::::   :::::::  / /__/ __/ _ \(_-<(_-</ _ \/ _ `/ __/ / _/_>  <
-    :::::   :   :::::  \___/_/  \___/___/___/_.__/\_,_/_/   /_/ /_/|_|
-          :::::
-    :::::::::::::::::   {title} v{version} [{build}]
-
-    Copyright (c) 2013-{year} Crossbar.io Technologies GmbH. All rights reserved.
-"""
-
-_DESC = """Crossbar.io FX is a decentralized data plane for XBR/WAMP based application
-service and data routing, built on Crossbar.io OSS."""
 
 
 class Personality(CrossbarPersonality):
@@ -373,19 +353,6 @@ class Personality(CrossbarPersonality):
     log = txaio.make_logger()
 
     NAME = 'edge'
-
-    TITLE = _TITLE
-
-    DESC = _DESC
-
-    BANNER = _BANNER.format(title=_TITLE,
-                            version=crossbar.__version__,
-                            build=crossbar.__build__,
-                            year=time.strftime('%Y'))
-
-    LEGAL = ('crossbar', 'LEGAL')
-    LICENSE = ('crossbar', 'LICENSE')
-    LICENSES_OSS = ('crossbar', 'LICENSES-OSS')
 
     TEMPLATE_DIRS = [('crossbar', 'edge/webservice/templates')] + CrossbarPersonality.TEMPLATE_DIRS
 
@@ -399,7 +366,7 @@ class Personality(CrossbarPersonality):
         **CrossbarPersonality.WEB_SERVICE_FACTORIES
     }
 
-    REALM_STORES: Dict[str, object] = {'cfxdb': CfxDbRealmStore, **CrossbarPersonality.REALM_STORES}
+    REALM_STORES: Dict[str, object] = {'cfxdb': RealmStoreDatabase, **CrossbarPersonality.REALM_STORES}
 
     check_controller = check_controller
     check_controller_options = check_controller_options

@@ -4,7 +4,7 @@
 #  SPDX-License-Identifier: EUPL-1.2
 #
 #####################################################################################
-"""Crossbar.io FX is a decentralized data plane for XBR/WAMP based application
+"""Crossbar.io is a decentralized data plane for XBR/WAMP based application
 service and data routing, built on Crossbar.io OSS."""
 
 import os
@@ -79,6 +79,10 @@ if not hasattr(abi, 'process_type'):
 # https://docs.python.org/3/library/warnings.html
 # /opt/pypy3/lib-python/3/importlib/_bootstrap.py:223: builtins.UserWarning: builtins.type size changed, may indicate binary incompatibility. Expected 872, got 416
 warnings.filterwarnings("ignore", message="builtins.type size changed, may indicate binary incompatibility")
+
+# https://peps.python.org/pep-0632/
+# site-packages/_distutils_hack/__init__.py:30: builtins.UserWarning: Setuptools is replacing distutils.
+warnings.filterwarnings("ignore", message="Setuptools is replacing distutils.")
 
 __all__ = ('__version__', '__build__', 'run', 'personalities')
 
@@ -204,7 +208,7 @@ def run():
     # if no known top-level command was given, fallback to "edge" mode
     if command not in _TOP_COMMANDS:
         args = [command] + args
-        command = 'edge'
+        command = 'standalone'
 
     # redirect a plain "crossbar legal" to "crossbar master legal"
     if command == 'legal':

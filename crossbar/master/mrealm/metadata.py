@@ -1,7 +1,7 @@
 ###############################################################################
 #
-# Crossbar.io FX Master
-# Copyright (c) Crossbar.io Technologies GmbH. All rights reserved.
+# Crossbar.io Master
+# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -9,6 +9,7 @@ import uuid
 from pprint import pformat
 
 import txaio
+
 txaio.use_twisted()
 from txaio import sleep, time_ns
 from twisted.internet.defer import inlineCallbacks

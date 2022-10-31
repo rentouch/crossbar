@@ -1,6 +1,6 @@
 ##############################################################################
 #
-#                        Crossbar.io FX
+#                        Crossbar.io
 #     Copyright (C) Crossbar.io Technologies GmbH. All rights reserved.
 #
 ##############################################################################
@@ -35,6 +35,7 @@ from requests.exceptions import ConnectionError
 from hexbytes import HexBytes
 
 import txaio
+
 txaio.use_twisted()  # noqa
 from txaio import time_ns
 
@@ -50,7 +51,8 @@ from autobahn.wamp.exception import ApplicationError
 from autobahn.wamp.message import _URI_PAT_STRICT_LAST_EMPTY
 from autobahn.wamp.types import CallDetails
 from autobahn.xbr import unpack_uint256, pack_uint256, recover_eip712_consent, \
-    is_address, without_0x
+    is_address
+from autobahn.util import without_0x
 
 from crossbar._util import hl, hlid, hltype
 from crossbar.edge.worker.xbr._util import hlval, hlcontract
@@ -172,7 +174,8 @@ class MarketMaker(object):
         sync = cfg.get('sync', True)
         assert type(sync) == bool, "sync must be a bool, was {}".format(type(sync))
 
-        self._db = zlmdb.Database(dbpath=dbpath, maxsize=maxsize, readonly=readonly, sync=sync)
+        # self._db = zlmdb.Database(dbpath=dbpath, maxsize=maxsize, readonly=readonly, sync=sync, context=self)
+        self._db = zlmdb.Database.open(dbpath=dbpath, maxsize=maxsize, readonly=readonly, sync=sync, context=self)
         self._db.__enter__()
         self._schema = cfxdb.xbr.Schema.attach(self._db)
 

@@ -1,6 +1,6 @@
 ###############################################################################
 #
-# Copyright (c) Crossbar.io Technologies GmbH. All rights reserved.
+# Copyright (c) Crossbar.io Technologies GmbH. Licensed under EUPLv1.2.
 #
 ###############################################################################
 
@@ -50,7 +50,7 @@ from autobahn.wamp.exception import TransportLost
 from autobahn.wamp import auth
 from autobahn.wamp.types import PublishOptions, RegisterOptions, CallOptions
 from autobahn.websocket.protocol import parse_url
-from autobahn.wamp.cryptosign import SigningKey
+from autobahn.wamp.cryptosign import CryptosignKey
 
 from .util import CtsSubprocessProtocol
 
@@ -221,11 +221,11 @@ def sequential_ids(prefix):
 
 def _create_signing_key():
     """
-    :returns: a new SigningKey instance and a hex encoding of the
+    :returns: a new CryptosignKey instance and a hex encoding of the
         private key data.
     """
     keydata = os.urandom(32)
-    sk = SigningKey.from_key_bytes(keydata)
+    sk = CryptosignKey.from_bytes(keydata)
     privkey_hex = sk._key.encode(encoder=encoding.HexEncoder).decode('ascii')
 
     return sk, privkey_hex
@@ -353,7 +353,7 @@ class LauncherProcessController(object):
             stdout=LogPrinter(), stderr=LogPrinter(),
         )
         keydata = os.urandom(32)
-        signing_key = SigningKey.from_key_bytes(keydata)
+        signing_key = CryptosignKey.from_bytes(keydata)
         probe_privkey_fname = path.join(self._workdir, "{}.privkey".format(probe_id))
         with open(probe_privkey_fname, 'wb') as f:
             f.write(keydata)
@@ -1139,14 +1139,16 @@ class LoggingProcessProtocol(ProcessProtocol):
     def outReceived(self, data):
         if self._publish:
             self._publish(self._stdout_topic, data)
+        print(data.decode('utf8'))
 
     def errReceived(self, data):
         if self._publish:
             self._publish(self._stderr_topic, data)
+        print(data.decode('utf8'))
 
     def processEnded(self, reason):
         if isinstance(reason.value, ProcessTerminated):
-            self.exit_status = reason.value.status
+            self.exit_status = reason.value.exitCode
         elif isinstance(reason.value, ProcessDone):
             self.exit_status = 0
         else:
@@ -1228,21 +1230,21 @@ async def create_virtualenv(python, env_dir, env, requirements, logging=True, ju
 
     if requirements:
         print("Installing requirements in Python virtualenv '{}' ...".format(env_dir))
-        req_fname = os.path.join(env_dir, "requirements.txt")
+        req_fname = os.path.join(env_dir, "requirements-latest.txt")
         with open(req_fname, 'w') as reqfile:
             for line in requirements:
                 reqfile.write("{}\n".format(line))
 
         if not python.startswith('python3'):
             # upgrading pip, "because Debian" :/
-            ecode = await run_process(venv_py, ["-m", "pip", "install", "--upgrade", "pip<19"], env)
+            ecode = await run_process(venv_py, ["-m", "pip", "install", "--upgrade", "pip"], env)
             if ecode != 0:
                 raise RuntimeError("pip upgrade failed")
 
         ecode = await run_process(venv_py, ["-m", "pip", "install", "--upgrade", "-r", req_fname], env,
                                   publisher=publisher)
         if ecode != 0:
-            raise RuntimeError("pip install failed")
+            raise RuntimeError("pip install failed (req_fname={}): ecode={}".format(req_fname, ecode))
         print("Requirements for Python virtualenv installed.")
     else:
         log_pip = None

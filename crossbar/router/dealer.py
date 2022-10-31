@@ -43,18 +43,20 @@ class InvocationRequest(object):
         'call',
         'callee',
         'forward_for',
+        'authorization',
         'canceled',
         'error_msg',
         'timeout_call',
     )
 
-    def __init__(self, id, registration, caller, call, callee, forward_for):
+    def __init__(self, id, registration, caller, call, callee, forward_for, authorization):
         self.id = id
         self.registration = registration
         self.caller = caller
         self.call = call
         self.callee = callee
         self.forward_for = forward_for
+        self.authorization = authorization
         self.canceled = False
         self.error_msg = None
         self.timeout_call = None  # if we have a timeout pending, this is it
@@ -161,7 +163,7 @@ class Dealer(object):
 
         # store for call queues
         if self._router._store:
-            self._call_store = self._router._store.call_store
+            self._call_store = self._router._store
         else:
             self._call_store = None
 
@@ -190,9 +192,8 @@ class Dealer(object):
                 if invoke.callee is invoke.caller:  # if the calling itself - no need to notify
                     continue
                 callee = invoke.callee
-                if 'callee' not in callee._session_roles \
-                        or not callee._session_roles['callee'] \
-                        or not callee._session_roles['callee'].call_canceling:
+                if 'callee' not in callee._session_roles or not callee._session_roles['callee'] or \
+                        not callee._session_roles['callee'].call_canceling:
                     self.log.debug(
                         "INTERRUPT not supported on in-flight INVOKE with id={request} on"
                         " session {session} (caller went away)",
@@ -243,9 +244,7 @@ class Dealer(object):
                 # publish WAMP meta events, if we have a service session, but
                 # not for the meta API itself!
                 #
-                if self._router._realm and \
-                   self._router._realm.session and \
-                   not registration.uri.startswith('wamp.'):
+                if self._router._realm and self._router._realm.session and not registration.uri.startswith('wamp.'):
 
                     def _publish(registration):
                         service_session = self._router._realm.session
@@ -472,10 +471,8 @@ class Dealer(object):
                 # publish WAMP meta events, if we have a service session, but
                 # not for the meta API itself!
                 #
-                if self._router._realm and \
-                   self._router._realm.session and \
-                   not registration.uri.startswith('wamp.') and \
-                   (is_first_callee or not was_already_registered):
+                if self._router._realm and self._router._realm.session and \
+                        not registration.uri.startswith('wamp.') and (is_first_callee or not was_already_registered):
 
                     reply.correlation_is_last = False
 
@@ -631,10 +628,8 @@ class Dealer(object):
         # publish WAMP meta events, if we have a service session, but
         # not for the meta API itself!
         #
-        if self._router._realm and \
-           self._router._realm.session and \
-           not registration.uri.startswith('wamp.') and \
-           (was_registered or was_deleted):
+        if self._router._realm and self._router._realm.session and not registration.uri.startswith('wamp.') and \
+                (was_registered or was_deleted):
 
             has_follow_up_messages = True
 
@@ -693,15 +688,15 @@ class Dealer(object):
 
         # actively inform the callee that it has been unregistered
         #
-        if 'callee' in session._session_roles and session._session_roles['callee'] and session._session_roles[
-                'callee'].registration_revocation:
+        if 'callee' in session._session_roles and session._session_roles['callee'] and \
+                session._session_roles['callee'].registration_revocation:
             reply = message.Unregistered(0, registration=registration.id, reason=reason)
             reply.correlation_uri = registration.uri
             self._router.send(session, reply)
 
         return was_registered, was_last_callee
 
-    def processCall(self, session, call):
+    def processCall(self, session, call: message.Call):
         """
         Implements :func:`crossbar.router.interfaces.IDealer.processCall`
         """
@@ -733,13 +728,36 @@ class Dealer(object):
             self._router.send(session, reply)
             return
 
-        # authorize CALL action
-        #
+        # authorize CALL action:
+        #  - returns an authorization dict
+        #  - might use static (aka "permissions") or dynamic authorizers
+        #  - might be cached in the router
+        #  - might include a payload validate stanza
+        #  - will be store (later) in InvocationRequest.authorization
         d = self._router.authorize(session, call.procedure, 'call', options=call.marshal_options())
 
         def on_authorize_success(authorization):
+            # authorization = {
+            #     'allow': True,
+            #     'disclose': False,
+            #     'validate': {
+            #         'catalog': 'pydefi.eth',
+            #         'args': None,
+            #         'kwargs': None,
+            #         'results': ['Address'],
+            #         'kwresults': None,
+            #     },
+            #     'meta': {
+            #         'args': None,
+            #         'kwargs': {
+            #             'clock_oid': _clock_oid
+            #         }
+            #     },
+            #     'cache': True,
+            # }
+
             # the call to authorize the action _itself_ succeeded. now go on depending on whether
-            # the action was actually authorized or not ..
+            # the action was actually authorized or not
             if not call.procedure.endswith('.on_log'):
                 self.log.debug(
                     '{func}::on_authorize_success() - permission {result} for CALL of procedure "{procedure}" [realm="{realm}", session_id={session_id}, authid="{authid}", authrole="{authrole}"]',
@@ -753,8 +771,9 @@ class Dealer(object):
 
             if not authorization['allow']:
                 reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.NOT_AUTHORIZED, [
-                    'session (session_id={}, authid="{}", authrole="{}") is not authorized to call procedure "{}" on realm "{}"'
-                    .format(session._session_id, session._authid, session._authrole, call.procedure, session._realm)
+                    'session (session_id={}, authid="{}", authrole="{}") is not authorized to '
+                    'call procedure "{}" on realm "{}"'.format(session._session_id, session._authid, session._authrole,
+                                                               call.procedure, session._realm)
                 ])
                 reply.correlation_id = call.correlation_id
                 reply.correlation_uri = call.procedure
@@ -763,36 +782,34 @@ class Dealer(object):
                 self._router.send(session, reply)
 
             else:
+                # validate payload (skip in "payload_transparency" mode)
+                if call.payload is None:
+                    try:
+                        self._router.validate('call',
+                                              call.procedure,
+                                              call.args,
+                                              call.kwargs,
+                                              validate=authorization.get('validate', None))
+                    except Exception as e:
+                        reply = message.Error(
+                            message.Call.MESSAGE_TYPE, call.request, ApplicationError.INVALID_ARGUMENT, [
+                                "call of procedure '{0}' with invalid application payload: {1}".format(
+                                    call.procedure, e)
+                            ])
+                        reply.correlation_id = call.correlation_id
+                        reply.correlation_uri = call.procedure
+                        reply.correlation_is_anchor = False
+                        reply.correlation_is_last = True
+                        self._router.send(session, reply)
+                        return
+
                 # get registrations active on the procedure called
-                #
                 registration = self._registration_map.best_matching_observation(call.procedure)
 
-                # if the session disconencted while the authorization
-                # was being checked, 'registration' will be None and
-                # we'll (correctly) fire an error.
-
+                # if the session disconnected while the authorization was being checked,
+                # 'registration' will be None, and we'll (correctly) fire an error.
                 if registration:
-
-                    # validate payload (skip in "payload_transparency" mode)
-                    #
-                    if call.payload is None:
-                        try:
-                            self._router.validate('call', call.procedure, call.args, call.kwargs)
-                        except Exception as e:
-                            reply = message.Error(
-                                message.Call.MESSAGE_TYPE, call.request, ApplicationError.INVALID_ARGUMENT, [
-                                    "call of procedure '{0}' with invalid application payload: {1}".format(
-                                        call.procedure, e)
-                                ])
-                            reply.correlation_id = call.correlation_id
-                            reply.correlation_uri = call.procedure
-                            reply.correlation_is_anchor = False
-                            reply.correlation_is_last = True
-                            self._router.send(session, reply)
-                            return
-
-                    # now actually perform the invocation of the callee ..
-                    #
+                    # now actually perform the invocation of the callee
                     self._call(session, call, registration, authorization)
                 else:
                     reply = message.Error(message.Call.MESSAGE_TYPE, call.request, ApplicationError.NO_SUCH_PROCEDURE,
@@ -856,11 +873,11 @@ class Dealer(object):
                             session, call, registration, authorization)):
                         return False
                     else:
-                        reply = message.Error(
-                            message.Call.MESSAGE_TYPE, call.request, 'crossbar.error.max_concurrency_reached', [
-                                'maximum concurrency {} of callee/endpoint reached (on non-shared/single registration)'
-                                .format(callee_extra.concurrency)
-                            ])
+                        reply = message.Error(message.Call.MESSAGE_TYPE, call.request,
+                                              'crossbar.error.max_concurrency_reached', [
+                                                  'maximum concurrency {} of callee/endpoint reached (on '
+                                                  'non-shared/single registration)'.format(callee_extra.concurrency)
+                                              ])
                         reply.correlation_id = call.correlation_id
                         reply.correlation_uri = call.procedure
                         reply.correlation_is_anchor = False
@@ -872,7 +889,8 @@ class Dealer(object):
 
         elif registration.extra.invoke == message.Register.INVOKE_ROUNDROBIN:
 
-            # remember where we started to search for a suitable callee/endpoint in the round-robin list of callee endpoints
+            # remember where we started to search for a suitable callee/endpoint in the
+            # round-robin list of callee endpoints
             roundrobin_start_index = registration.extra.roundrobin_current % len(registration.observers)
 
             # now search fo a suitable callee/endpoint
@@ -887,7 +905,7 @@ class Dealer(object):
                     if callee_extra.concurrency_current >= callee_extra.concurrency:
 
                         # this callee has set a maximum concurrency that has already been reached.
-                        # we need to search further .. but only if we haven't reached the beginning
+                        # we need to search further, but only if we haven't reached the beginning
                         # of our round-robin list
                         if registration.extra.roundrobin_current % len(
                                 registration.observers) == roundrobin_start_index:
@@ -897,12 +915,11 @@ class Dealer(object):
                                     session, call, registration, authorization)):
                                 return False
                             else:
-                                reply = message.Error(
-                                    message.Call.MESSAGE_TYPE, call.request, 'crossbar.error.max_concurrency_reached',
-                                    [
-                                        'maximum concurrency {} of all callee/endpoints reached (on round-robin registration)'
-                                        .format(callee_extra.concurrency)
-                                    ])
+                                reply = message.Error(message.Call.MESSAGE_TYPE, call.request,
+                                                      'crossbar.error.max_concurrency_reached', [
+                                                          'maximum concurrency {} of all callee/endpoints reached (on '
+                                                          'round-robin registration)'.format(callee_extra.concurrency)
+                                                      ])
                                 reply.correlation_id = call.correlation_id
                                 reply.correlation_uri = call.procedure
                                 reply.correlation_is_anchor = False
@@ -992,6 +1009,7 @@ class Dealer(object):
                                             caller_authid=caller_authid,
                                             caller_authrole=caller_authrole,
                                             procedure=procedure,
+                                            transaction_hash=call.transaction_hash,
                                             enc_algo=call.enc_algo,
                                             enc_key=call.enc_key,
                                             enc_serializer=call.enc_serializer,
@@ -1007,6 +1025,7 @@ class Dealer(object):
                                             caller_authid=caller_authid,
                                             caller_authrole=caller_authrole,
                                             procedure=procedure,
+                                            transaction_hash=call.transaction_hash,
                                             forward_for=forward_for)
 
         invocation.correlation_id = call.correlation_id
@@ -1027,6 +1046,7 @@ class Dealer(object):
                                  call,
                                  callee,
                                  forward_for,
+                                 authorization,
                                  timeout=call.timeout)
         self._router.send(callee, invocation)
         return True
@@ -1038,12 +1058,14 @@ class Dealer(object):
                             call,
                             callee,
                             forward_for,
+                            authorization,
                             timeout=None):
         """
         Internal helper.  Adds an InvocationRequest to both the
         _callee_to_invocations and _invocations maps.
         """
-        invoke_request = InvocationRequest(invocation_request_id, registration, session, call, callee, forward_for)
+        invoke_request = InvocationRequest(invocation_request_id, registration, session, call, callee, forward_for,
+                                           authorization)
         self._invocations[invocation_request_id] = invoke_request
         self._invocations_by_call[session._session_id, call.request] = invoke_request
         invokes = self._callee_to_invocations.get(callee, [])
@@ -1285,8 +1307,11 @@ class Dealer(object):
                 if yield_.payload is None:
                     # validate normal args/kwargs payload
                     try:
-                        self._router.validate('call_result', invocation_request.call.procedure, yield_.args,
-                                              yield_.kwargs)
+                        self._router.validate('call_result',
+                                              invocation_request.call.procedure,
+                                              yield_.args,
+                                              yield_.kwargs,
+                                              validate=invocation_request.authorization.get('validate', None))
                     except Exception as e:
                         is_valid = False
                         reply = message.Error(
@@ -1457,8 +1482,11 @@ class Dealer(object):
                 if error.payload is None:
                     # validate normal args/kwargs payload
                     try:
-                        self._router.validate('call_error', invocation_request.call.procedure, error.args,
-                                              error.kwargs)
+                        self._router.validate('call_error',
+                                              invocation_request.call.procedure,
+                                              error.args,
+                                              error.kwargs,
+                                              validate=invocation_request.authorization.get('validate', None))
                     except Exception as e:
                         reply = message.Error(
                             message.Call.MESSAGE_TYPE,

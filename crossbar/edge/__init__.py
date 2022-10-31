@@ -1,11 +1,12 @@
 ##############################################################################
 #
-#                        Crossbar.io FX
+#                        Crossbar.io
 #     Copyright (C) Crossbar.io Technologies GmbH. All rights reserved.
 #
 ##############################################################################
 
 import txaio
+
 txaio.use_twisted()  # noqa
 
 from autobahn import xbr
