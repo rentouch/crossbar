@@ -1,5 +1,6 @@
 attrs>=17.2.0
-autobahn[twisted,encryption,compress,serialization,scram,xbr] @ git+https://github.com/rentouch/autobahn-python.git@4b96119910e811429108b5eabb8c02d96ff523d4
+#autobahn[twisted,encryption,compress,serialization,scram,xbr] @ git+https://github.com/rentouch/autobahn-python.git@4b96119910e811429108b5eabb8c02d96ff523d4
+autobahn[twisted,encryption,compress,serialization,scram,xbr] @ git+https://github.com/rentouch/autobahn-python.git@1170e16271d5ae179373fc58602999bb2a564826
 base58>=2.1.0
 bcrypt>=3.1.6
 bitstring>=3.1.5
