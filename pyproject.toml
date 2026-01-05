@@ -50,7 +50,6 @@ dependencies = [
     "txaio>=25.12.2",
     "zlmdb>=25.12.3",
     "cfxdb>=25.12.2",
-    "xbr>=25.12.2",
     # Twisted ecosystem
     "twisted[tls,conch,http2]>=22.10.0; sys_platform != 'darwin' and sys_platform != 'win32'",
     "twisted[tls,conch,http2,osx_platform]>=22.10.0; sys_platform == 'darwin'",
@@ -132,6 +131,7 @@ dependencies = [
     "werkzeug>=2.2.2",
     "wsaccel>=0.6.4; platform_python_implementation=='CPython'",
     "zope.interface>=5.5.2",
+    "xbr>=25.12.2",
 ]
 
 [project.optional-dependencies]
@@ -320,3 +320,4 @@ filename = "NEWS.rst"
 
 [tool.uv.sources]
 autobahn = { git = "https://github.com/rentouch/autobahn-python", rev = "5fea87607d144b4d47c7c814c88199b417d987a7" }
+xbr = { url = "https://github.com/rentouch/wamp-xbr/releases/download/without-ecdsa/xbr-25.12.2-py3-none-any.whl" }

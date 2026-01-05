@@ -1465,7 +1465,7 @@ requires-dist = [
     { name = "werkzeug", specifier = ">=2.2.2" },
     { name = "wheel", marker = "extra == 'dev'" },
     { name = "wsaccel", marker = "platform_python_implementation == 'CPython'", specifier = ">=0.6.4" },
-    { name = "xbr", specifier = ">=25.12.2" },
+    { name = "xbr", url = "https://github.com/rentouch/wamp-xbr/releases/download/without-ecdsa/xbr-25.12.2-py3-none-any.whl" },
     { name = "zlmdb", specifier = ">=25.12.3" },
     { name = "zope-interface", specifier = ">=5.5.2" },
 ]
@@ -1730,18 +1730,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/ae/ed/aefcc8cd0ba62a0560c3c18c33925362d46c6075480bfa4df87b28e169a9/docutils-0.21.2.tar.gz", hash = "sha256:3a6b18732edf182daa3cd12775bbb338cf5691468f91eeeb109deff6ebfa986f", size = 2204444 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8f/d7/9322c609343d929e75e7e5e6255e614fcc67572cfd083959cdef3b7aad79/docutils-0.21.2-py3-none-any.whl", hash = "sha256:dafca5b9e384f0e419294eb4d2ff9fa826435bf15f15b7bd45723e8ad76811b2", size = 587408 },
-]
-
-[[package]]
-name = "ecdsa"
-version = "0.19.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "six" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/c0/1f/924e3caae75f471eae4b26bd13b698f6af2c44279f67af317439c2f4c46a/ecdsa-0.19.1.tar.gz", hash = "sha256:478cba7b62555866fcb3bb3fe985e06decbdb68ef55713c4e5ab98c57d508e61", size = 201793 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/cb/a3/460c57f094a4a165c84a1341c373b0a4f5ec6ac244b998d5021aade89b77/ecdsa-0.19.1-py2.py3-none-any.whl", hash = "sha256:30638e27cf77b7e15c4c4cc1973720149e1033827cfd00661ca5c8cc0cdb24c3", size = 150607 },
 ]
 
 [[package]]
@@ -5417,7 +5405,7 @@ wheels = [
 [[package]]
 name = "xbr"
 version = "25.12.2"
-source = { registry = "https://pypi.org/simple" }
+source = { url = "https://github.com/rentouch/wamp-xbr/releases/download/without-ecdsa/xbr-25.12.2-py3-none-any.whl" }
 dependencies = [
     { name = "argon2-cffi" },
     { name = "autobahn" },
@@ -5425,7 +5413,6 @@ dependencies = [
     { name = "bitarray" },
     { name = "cbor2" },
     { name = "click" },
-    { name = "ecdsa" },
     { name = "eth-abi" },
     { name = "hkdf" },
     { name = "humanize" },
@@ -5444,10 +5431,66 @@ dependencies = [
     { name = "yapf" },
     { name = "zlmdb" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/66/9a/d97568920f4f9b315e1adb72d38eeb7df9937bf1b49939765c5529e936c1/xbr-25.12.2.tar.gz", hash = "sha256:9e2d0d5b53ee23ad084f1b4288215e54fc3e10c9df03e2c4ac64e2ebe564d387", size = 9241849 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2b/9c/d3a78dac9d5bdd293cd0d90aebf52be4f97135670584a6370853f8a714d4/xbr-25.12.2-py3-none-any.whl", hash = "sha256:5569def3ac976605880ac1fc5262c315eb43be936ac02c8040d8582a7aa6cce9", size = 1329767 },
+    { url = "https://github.com/rentouch/wamp-xbr/releases/download/without-ecdsa/xbr-25.12.2-py3-none-any.whl", hash = "sha256:12827c5dda4b59c52b118777e7d2f10239ca59f5498802ccb5bff1136742fd4f" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "antlr4-python3-runtime", marker = "extra == 'dev'", specifier = ">=4.9.0" },
+    { name = "antlr4-python3-runtime", marker = "extra == 'docs'", specifier = ">=4.9.0" },
+    { name = "argon2-cffi", specifier = ">=21.3.0" },
+    { name = "autobahn", specifier = ">=25.12.2" },
+    { name = "base58", specifier = ">=2.1.0" },
+    { name = "bitarray", specifier = ">=2.7.5" },
+    { name = "build", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "cbor2", specifier = ">=5.2.0" },
+    { name = "click", specifier = ">=8.1.2" },
+    { name = "coverage", marker = "extra == 'dev'", specifier = ">=5.0.0" },
+    { name = "eth-abi", specifier = ">=4.0.0" },
+    { name = "furo", marker = "extra == 'docs'", specifier = ">=2024.7.0" },
+    { name = "hkdf", specifier = ">=0.0.3" },
+    { name = "humanize", specifier = ">=4.0.0" },
+    { name = "jinja2", specifier = ">=2.11.3" },
+    { name = "linkify-it-py", marker = "extra == 'docs'", specifier = ">=2.0.0" },
+    { name = "mnemonic", specifier = ">=0.19" },
+    { name = "myst-parser", marker = "extra == 'docs'", specifier = ">=2.0" },
+    { name = "numpy", specifier = ">=1.21.0" },
+    { name = "peewee", marker = "extra == 'dev'", specifier = ">=3.0.0" },
+    { name = "peewee", marker = "extra == 'docs'", specifier = ">=3.0.0" },
+    { name = "py-ecc", specifier = ">=5.1.0" },
+    { name = "py-eth-sig-utils", specifier = ">=0.4.0" },
+    { name = "py-multihash", specifier = ">=2.0.1" },
+    { name = "pyenchant", marker = "extra == 'docs'", specifier = ">=3.2" },
+    { name = "pygments-lexer-solidity", marker = "extra == 'dev'", specifier = ">=0.7.0" },
+    { name = "pygments-lexer-solidity", marker = "extra == 'docs'", specifier = ">=0.7.0" },
+    { name = "pynacl", specifier = ">=1.5.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
+    { name = "pytest-runner", marker = "extra == 'dev'", specifier = ">=2.11.1" },
+    { name = "rlp", specifier = ">=2.0.1" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
+    { name = "scour", marker = "extra == 'dev'", specifier = ">=0.38" },
+    { name = "scour", marker = "extra == 'docs'", specifier = ">=0.38" },
+    { name = "spake2", specifier = ">=0.8" },
+    { name = "sphinx", marker = "extra == 'dev'", specifier = ">=8.0.0" },
+    { name = "sphinx", marker = "extra == 'docs'", specifier = ">=8.2.3" },
+    { name = "sphinx-autoapi", marker = "extra == 'docs'", specifier = ">=2.1.0" },
+    { name = "sphinx-copybutton", marker = "extra == 'docs'", specifier = ">=0.5" },
+    { name = "sphinx-design", marker = "extra == 'docs'", specifier = ">=0.5" },
+    { name = "sphinx-rtd-theme", marker = "extra == 'dev'", specifier = ">=3.0.0" },
+    { name = "sphinxcontrib-images", marker = "extra == 'dev'", specifier = ">=1.0.1" },
+    { name = "sphinxcontrib-images", marker = "extra == 'docs'", specifier = ">=0.9" },
+    { name = "sphinxcontrib-spelling", marker = "extra == 'docs'", specifier = ">=8.0" },
+    { name = "sphinxext-opengraph", marker = "extra == 'docs'", specifier = ">=0.9" },
+    { name = "twine", marker = "extra == 'dev'", specifier = ">=3.3.0" },
+    { name = "twisted", specifier = ">=20.3.0" },
+    { name = "txaio", specifier = ">=25.12.2" },
+    { name = "web3", extras = ["ipfs"], specifier = ">=6.0.0" },
+    { name = "wheel", marker = "extra == 'dev'", specifier = ">=0.36.2" },
+    { name = "yapf", specifier = "==0.29.0" },
+    { name = "zlmdb", specifier = ">=25.12.3" },
+]
+provides-extras = ["dev", "docs", "ui"]
 
 [[package]]
 name = "yapf"
