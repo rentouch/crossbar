@@ -318,6 +318,13 @@ package = "crossbar"
 package_dir = "src"
 filename = "NEWS.rst"
 
+[tool.uv]
+# Pin transitive dependencies (crossbar does not import these directly).
+# bitarray comes in via bitstring, eth-account and xbr.
+constraint-dependencies = [
+    "bitarray==3.9.0",
+]
+
 [tool.uv.sources]
 autobahn = { git = "https://github.com/rentouch/autobahn-python", rev = "5fea87607d144b4d47c7c814c88199b417d987a7" }
 xbr = { url = "https://github.com/rentouch/wamp-xbr/releases/download/without-ecdsa/xbr-25.12.2-py3-none-any.whl" }
